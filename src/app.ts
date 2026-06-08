@@ -18,6 +18,7 @@ import { loanHandler } from "./routes/loan.js";
 import { walletLoansHandler } from "./routes/wallet-loans.js";
 import { simulateBorrowHandler } from "./routes/simulate-borrow.js";
 import { buildBorrowHandler } from "./routes/build-borrow.js";
+import { creditAttestHandler } from "./routes/credit-attest.js";
 import { TIERS } from "./lib/tiers.js";
 
 const PAY_TO = process.env.MAGPIE_PAY_TO;
@@ -218,6 +219,24 @@ if (PAY_TO) {
       docsUrl: "https://github.com/magpiecapital/magpie-x402#agent-build-borrow",
     }),
     buildBorrowHandler,
+  );
+
+  // Signed credit attestation. The killer differentiator: the response
+  // includes an ed25519 signature from the lender authority over a
+  // canonical payload, so OTHER protocols can verify the score
+  // cryptographically. Portable on-chain reputation for agents.
+  //
+  // Priced low (0.0005 SOL) because we want this to be cheap enough
+  // that protocols building on it can afford to verify per-request.
+  app.get(
+    "/api/v1/agent/credit-attest",
+    x402Required({
+      payTo: PAY_TO,
+      amountLamports: 500_000n, // 0.0005 SOL per attestation
+      label: "Magpie signed credit attestation",
+      docsUrl: "https://github.com/magpiecapital/magpie-x402#agent-credit-attest",
+    }),
+    creditAttestHandler,
   );
 } else {
   // Surfaces a clear "service misconfigured" error instead of a silent
