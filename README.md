@@ -106,10 +106,50 @@ Response:
 ```bash
 git clone git@github.com:magpiecapital/magpie-x402.git
 cd magpie-x402
-cp .env.example .env       # fill in MAGPIE_PAY_TO with a Solana pubkey
+cp .env.example .env       # fill in MAGPIE_PAY_TO + MAGPIE_LENDER_PUBKEY
 npm install
 npm run dev                 # http://localhost:8402
 ```
+
+## Deploy to Vercel (1-click)
+
+The repo is structured for Vercel serverless out of the box:
+- `api/index.ts` — Vercel-native entry, handles every request via `hono/vercel` adapter
+- `vercel.json` — routes all paths to `/api`
+- `src/app.ts` — the shared Hono app (also used by local dev)
+- `src/index.ts` — local-dev Node server (NOT used by Vercel)
+
+### Step-by-step
+
+1. **In the Vercel dashboard, click "Add New" → "Project"**
+2. **Import `magpiecapital/magpie-x402` from GitHub**
+3. **Framework Preset:** "Other" (Vercel auto-detects via vercel.json)
+4. **Set Environment Variables** (Production + Preview + Development):
+   - `MAGPIE_PAY_TO` — your Solana treasury pubkey
+   - `MAGPIE_LENDER_PUBKEY` — the Magpie lender authority
+   - `SOLANA_RPC_URL` — use a paid Helius/Triton/QuickNode URL for speed (public RPC will rate-limit you)
+   - `CORS_ORIGINS` — comma-separated allowlist (use `*` only during testing)
+   - `RATE_LIMIT_PER_MIN` and `RATE_LIMIT_PER_HOUR` — tune per traffic
+5. **Click Deploy.** First build runs `npm install && npm run build` (or just `npm install` since Vercel handles TS) — ~1 minute.
+6. **Test:** `curl https://<your-deployment>.vercel.app/api/v1/pool`
+
+### Custom domain
+
+After the first deploy, in **Settings → Domains** attach `x402.magpie.capital` (or any subdomain you control). Vercel handles the TLS cert automatically.
+
+### Why Node runtime, not Edge
+
+`@solana/web3.js` depends on Buffer + Node crypto primitives that don't ship in Vercel's Edge runtime. Once `@solana/kit` (web3.js v2) stabilizes for Edge, switching gets us another latency win — but Node serverless is plenty fast for v0 (cold start ~150–250ms, warm <10ms server-side).
+
+### Multi-instance considerations (caveat for high-scale deploys)
+
+The in-memory nonce store (in `src/middleware/x402.ts`) and rate-limit buckets are per-instance. At low traffic, Vercel runs a single warm instance and this works fine. At high concurrency, Vercel scales horizontally — a payment challenge issued by instance A might fail validation on instance B because B hasn't seen the nonce.
+
+When that becomes a problem (it isn't for v0 — but if you push >20 req/s sustained, plan for it):
+- **Option 1:** HMAC-sign the nonces with a server secret. Stateless, infinitely scalable, no external dependency.
+- **Option 2:** Wire Vercel KV (Upstash Redis) for shared state. Drop-in via `@vercel/kv`.
+
+Both paths sketched in `SECURITY.md` under "production hardening".
 
 ## Security
 

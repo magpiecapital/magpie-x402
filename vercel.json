@@ -1,0 +1,15 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/api" }
+  ],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "X-Magpie-Service", "value": "magpie-x402" },
+        { "key": "X-Magpie-Source", "value": "https://github.com/magpiecapital/magpie-x402" }
+      ]
+    }
+  ]
+}
