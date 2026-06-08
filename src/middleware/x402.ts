@@ -1,82 +1,58 @@
 import type { Context, MiddlewareHandler } from "hono";
 import { PublicKey } from "@solana/web3.js";
 import { verifyPayment } from "../lib/solana.js";
+import { mintNonce, verifyNonce, NONCE_TTL_MS } from "../lib/hmac-nonce.js";
 
 /**
- * x402 — HTTP 402 "Payment Required" middleware for Solana.
+ * x402 — HTTP 402 Payment Required middleware (Solana, HMAC-nonces).
  *
- * Pattern:
- *   1. Client calls a protected endpoint without payment.
- *   2. Server replies 402 with X-PAYMENT-REQUIRED headers describing
- *      the payment scheme (recipient pubkey, amount, accepted mints,
- *      and a per-request `nonce` the client must include in the memo
- *      so the same payment can't be replayed against a different call).
- *   3. Client submits a Solana transaction transferring the amount to
- *      the recipient with the nonce in the memo.
- *   4. Client retries the same request with the tx signature in the
- *      `X-PAYMENT` header.
- *   5. Server verifies the tx on-chain (correct recipient, amount, mint,
- *      memo nonce, not previously consumed), then serves the response.
+ * Why this implementation is faster + more scalable than the
+ * common in-memory-map pattern:
+ *   - STATELESS nonces (HMAC-signed) → any function instance can
+ *     validate any challenge. Vercel scales horizontally without
+ *     breaking validation.
+ *   - PAYMENT-TX DEDUP via in-process Map keyed by the on-chain
+ *     signature (much smaller surface than nonce dedup; signature
+ *     uniqueness is enforced by Solana itself).
+ *   - PER-ENDPOINT BINDING — the endpoint path is HMAC'd into the
+ *     nonce, so a payment for /credit-score can't satisfy a /pool
+ *     request even if both happen to be the same amount.
  *
- * Security properties:
- *   - Nonces are single-use (in-memory set + 10-min expiry). A replayed
- *     payment for one nonce can't be used to satisfy a different
- *     endpoint call.
- *   - Payment verification is RPC-side; we never trust client-supplied
- *     amount/recipient. Always re-derives from the on-chain tx.
- *   - No private keys ever touch this service. We only receive
- *     payments; we never sign or hold funds.
- *   - All error messages are intentionally generic to avoid leaking
- *     verification logic to attackers.
+ * Flow:
+ *   1. Client → GET /endpoint without X-Payment header
+ *   2. Server → 402 with X-Payment-Required-* headers
+ *      (recipient, amount, mint, signed-nonce, memo)
+ *   3. Client → Solana tx transferring amount to recipient with
+ *      memo "magpie-x402:<nonce>"
+ *   4. Client → retry GET /endpoint with X-Payment: <signature>
+ *   5. Server → verify payment on-chain, verify nonce HMAC, verify
+ *      signature not previously consumed → serve response
  */
 
-const NONCE_TTL_MS = 10 * 60 * 1000; // 10 minutes
-const consumedNonces = new Map<string, number>();
-function pruneNonces() {
+// Signature-level dedup. Same payment tx can't be used twice across
+// 10-min window. In-process; multi-instance deploys should swap this
+// for Vercel KV / Upstash Redis. See SECURITY.md "production hardening".
+const consumedSignatures = new Map<string, number>();
+function pruneSignatures() {
   const now = Date.now();
-  for (const [n, exp] of consumedNonces) {
-    if (exp < now) consumedNonces.delete(n);
-  }
+  for (const [s, exp] of consumedSignatures) if (exp < now) consumedSignatures.delete(s);
 }
-setInterval(pruneNonces, 60_000).unref?.();
-
-/** Generate a fresh, unguessable nonce for a payment challenge. */
-function newNonce(): string {
-  const bytes = new Uint8Array(16);
-  globalThis.crypto.getRandomValues(bytes);
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-}
+setInterval(pruneSignatures, 60_000).unref?.();
 
 export interface X402Config {
-  /** Solana pubkey that receives the payment. */
   payTo: string;
-  /** Amount in lamports (for native SOL) or smallest token units. */
   amountLamports: bigint;
-  /** Mint to accept. If null/undefined → native SOL. */
   acceptedMint?: string;
-  /** Human-readable label for the response card. */
   label?: string;
-  /** A URL pointing at docs / pricing for the endpoint. */
   docsUrl?: string;
 }
 
-/**
- * Hono middleware that protects an endpoint behind an x402 payment.
- *
- * Usage:
- *   app.get("/api/v1/credit-score", x402Required({
- *     payTo: process.env.MAGPIE_PAY_TO!,
- *     amountLamports: 1_000_000n,  // 0.001 SOL
- *     label: "Magpie credit-score lookup",
- *   }), creditScoreHandler);
- */
 export function x402Required(config: X402Config): MiddlewareHandler {
-  // Validate config at construction time, not per-request
   let payToKey: PublicKey;
   try {
     payToKey = new PublicKey(config.payTo);
   } catch {
-    throw new Error("[x402] invalid MAGPIE_PAY_TO pubkey in config");
+    throw new Error("[x402] invalid payTo pubkey in config");
   }
   if (config.amountLamports <= 0n) {
     throw new Error("[x402] amountLamports must be > 0");
@@ -84,14 +60,12 @@ export function x402Required(config: X402Config): MiddlewareHandler {
 
   return async (c: Context, next) => {
     const paymentHeader = c.req.header("x-payment");
+    const endpoint = c.req.path;
 
-    // No payment supplied → return 402 with the challenge
+    // ── No payment supplied — return signed challenge ──
     if (!paymentHeader) {
-      const nonce = newNonce();
-      // Pre-reserve the nonce so it can't be guessed/replayed before
-      // the client sends payment. Marked with a future expiry; the
-      // verify step replaces with a "consumed" marker.
-      consumedNonces.set(nonce, Date.now() + NONCE_TTL_MS);
+      const nonce = mintNonce(endpoint);
+      const memo = `magpie-x402:${nonce}`;
       return c.json(
         {
           error: "payment_required",
@@ -100,15 +74,14 @@ export function x402Required(config: X402Config): MiddlewareHandler {
           amountLamports: config.amountLamports.toString(),
           acceptedMint: config.acceptedMint ?? "native-sol",
           nonce,
-          memo: `magpie-x402:${nonce}`,
+          memo,
           ttlMs: NONCE_TTL_MS,
           label: config.label,
           docs: config.docsUrl,
           instructions:
             `Send ${config.amountLamports.toString()} lamports of ` +
             `${config.acceptedMint ?? "SOL"} to ${payToKey.toBase58()} ` +
-            `with memo "magpie-x402:${nonce}", then retry with ` +
-            `header X-PAYMENT: <tx_signature>`,
+            `with memo "${memo}", then retry with header X-Payment: <tx_signature>`,
         },
         402,
         {
@@ -116,15 +89,20 @@ export function x402Required(config: X402Config): MiddlewareHandler {
           "X-Payment-Required-Amount": config.amountLamports.toString(),
           "X-Payment-Required-Recipient": payToKey.toBase58(),
           "X-Payment-Required-Nonce": nonce,
-          "X-Payment-Required-Memo": `magpie-x402:${nonce}`,
+          "X-Payment-Required-Memo": memo,
         },
       );
     }
 
-    // Payment supplied — verify it on-chain
+    // ── Payment supplied — verify ──
     const sig = paymentHeader.trim();
     if (!/^[1-9A-HJ-NP-Za-km-z]{64,90}$/.test(sig)) {
       return c.json({ error: "invalid_payment_format" }, 402);
+    }
+    // Dedup BEFORE the RPC roundtrip — cheap early reject
+    const existing = consumedSignatures.get(sig);
+    if (existing && existing > Date.now()) {
+      return c.json({ error: "payment_already_consumed" }, 402);
     }
 
     let verification;
@@ -136,33 +114,33 @@ export function x402Required(config: X402Config): MiddlewareHandler {
         expectedMint: config.acceptedMint ?? null,
       });
     } catch (err) {
-      // Generic error to avoid leaking RPC details
       console.warn("[x402] verify error:", (err as Error).message);
       return c.json({ error: "payment_verification_failed" }, 402);
     }
-
     if (!verification.valid) {
       return c.json({ error: "payment_invalid", reason: verification.reason }, 402);
     }
-
-    // Single-use nonce check (from the memo)
     const memoNonce = verification.memoNonce;
     if (!memoNonce) {
       return c.json({ error: "payment_missing_memo_nonce" }, 402);
     }
-    const reservation = consumedNonces.get(memoNonce);
-    const now = Date.now();
-    if (reservation === undefined || reservation < now) {
-      return c.json({ error: "nonce_expired_or_unknown" }, 402);
-    }
-    if (reservation === -1) {
-      return c.json({ error: "nonce_already_used" }, 402);
-    }
-    // Mark consumed
-    consumedNonces.set(memoNonce, -1);
 
-    // Attach verification details for downstream handlers if needed
-    c.set("x402", { signature: sig, nonce: memoNonce, payer: verification.payer });
+    // Verify the HMAC + endpoint binding + expiry — stateless check.
+    const nonceCheck = verifyNonce(memoNonce, endpoint);
+    if (!nonceCheck.ok) {
+      return c.json({ error: "nonce_invalid", reason: nonceCheck.reason }, 402);
+    }
+
+    // Single-use enforcement on the SIGNATURE (smaller, more accurate
+    // than nonce-dedup since signatures are unique on-chain).
+    consumedSignatures.set(sig, Date.now() + NONCE_TTL_MS);
+
+    c.set("x402", {
+      signature: sig,
+      nonce: memoNonce,
+      payer: verification.payer,
+      mintedAtMs: nonceCheck.mintedAtMs,
+    });
     await next();
   };
 }

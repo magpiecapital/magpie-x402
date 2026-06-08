@@ -125,9 +125,12 @@ export async function verifyPayment(opts: {
       memoText = (ix.parsed as { info?: { memo?: string } }).info?.memo;
     }
     if (!memoText) continue;
-    const m = memoText.match(/^magpie-x402:([a-f0-9]{32})$/i);
+    // Match either the v0 hex nonce (32 hex chars) OR the v1
+    // HMAC-signed nonce (base64url, ~66 chars). The middleware
+    // hands off to verifyNonce() which gates on length + MAC.
+    const m = memoText.match(/^magpie-x402:([A-Za-z0-9_\-]{32,128})$/);
     if (m) {
-      memoNonce = m[1].toLowerCase();
+      memoNonce = m[1];
       break;
     }
   }

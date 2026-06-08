@@ -14,6 +14,7 @@ import { x402Required } from "./middleware/x402.js";
 import { rateLimit } from "./middleware/rate-limit.js";
 import { creditScoreHandler } from "./routes/credit-score.js";
 import { poolHandler } from "./routes/pool.js";
+import { loanHandler } from "./routes/loan.js";
 
 const PAY_TO = process.env.MAGPIE_PAY_TO;
 
@@ -64,6 +65,54 @@ app.get("/health", (c) => c.json({ ok: true, ts: new Date().toISOString() }));
 // decodes the live LendingPool Anchor account from the canonical
 // program ID. Cached 15s in-process for speed.
 app.get("/api/v1/pool", poolHandler);
+app.get("/api/v1/loan/:loanId", loanHandler);
+
+// ─── OpenAPI 3.1 spec (for agent auto-discovery) ──────────────
+// Agent ecosystems (LangChain, Crew, Letta, etc.) commonly fetch
+// /openapi.json on a service URL to learn its endpoints. Serving
+// this is a fast win for discoverability.
+app.get("/openapi.json", (c) => c.json({
+  openapi: "3.1.0",
+  info: {
+    title: "Magpie x402 API",
+    version: "0.1.0",
+    description: "Pay-per-call API for Magpie Capital's permissionless lending protocol. Solana-native x402 payments.",
+    license: { name: "MIT", identifier: "MIT" },
+    contact: { url: "https://github.com/magpiecapital/magpie-x402/issues" },
+  },
+  servers: [{ url: "https://x402.magpie.capital" }],
+  paths: {
+    "/api/v1/pool": {
+      get: {
+        summary: "Live on-chain LendingPool state",
+        description: "Reads the Magpie LendingPool Anchor account directly from the program. 15s in-process cache.",
+        responses: { "200": { description: "Pool state", content: { "application/json": {} } } },
+      },
+    },
+    "/api/v1/loan/{loanId}": {
+      get: {
+        summary: "Fetch a single loan by ID",
+        description: "Reads the Loan PDA from the program for the given u64 loan_id.",
+        parameters: [{ name: "loanId", in: "path", required: true, schema: { type: "string", pattern: "^[0-9]+$" } }],
+        responses: {
+          "200": { description: "Loan state" },
+          "404": { description: "Loan not found" },
+        },
+      },
+    },
+    "/api/v1/credit-score": {
+      get: {
+        summary: "Magpie credit score for a wallet (paid: 0.001 SOL)",
+        description: "Returns the 300-850 credit score + tier benefits for a wallet. Requires x402 payment.",
+        parameters: [{ name: "wallet", in: "query", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": { description: "Credit score + tier benefits" },
+          "402": { description: "Payment Required — see X-Payment-Required-* headers" },
+        },
+      },
+    },
+  },
+}));
 
 app.get("/.well-known/x402.json", (c) =>
   c.json({
