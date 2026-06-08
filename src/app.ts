@@ -15,6 +15,7 @@ import { rateLimit } from "./middleware/rate-limit.js";
 import { creditScoreHandler } from "./routes/credit-score.js";
 import { poolHandler } from "./routes/pool.js";
 import { loanHandler } from "./routes/loan.js";
+import { walletLoansHandler } from "./routes/wallet-loans.js";
 
 const PAY_TO = process.env.MAGPIE_PAY_TO;
 
@@ -66,6 +67,7 @@ app.get("/health", (c) => c.json({ ok: true, ts: new Date().toISOString() }));
 // program ID. Cached 15s in-process for speed.
 app.get("/api/v1/pool", poolHandler);
 app.get("/api/v1/loan/:loanId", loanHandler);
+app.get("/api/v1/wallet/:wallet/loans", walletLoansHandler);
 
 // ─── OpenAPI 3.1 spec (for agent auto-discovery) ──────────────
 // Agent ecosystems (LangChain, Crew, Letta, etc.) commonly fetch
@@ -98,6 +100,17 @@ app.get("/openapi.json", (c) => c.json({
           "200": { description: "Loan state" },
           "404": { description: "Loan not found" },
         },
+      },
+    },
+    "/api/v1/wallet/{wallet}/loans": {
+      get: {
+        summary: "All loans owned by a wallet",
+        description: "Single-roundtrip getProgramAccounts + memcmp filter on the borrower offset. Optional ?status=active|repaid|liquidated query filter. 8s cache.",
+        parameters: [
+          { name: "wallet", in: "path", required: true, schema: { type: "string" } },
+          { name: "status", in: "query", required: false, schema: { type: "string", enum: ["active", "repaid", "liquidated"] } },
+        ],
+        responses: { "200": { description: "Loan list (newest-first)" } },
       },
     },
     "/api/v1/credit-score": {
