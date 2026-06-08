@@ -17,6 +17,8 @@ jobs:
           cache: 'npm'
       - run: npm ci
       - run: npx tsc --noEmit
+      - name: Run unit tests
+        run: npm test
       - name: Verify no secrets in source
         run: |
           # Defense-in-depth — block any commit that introduces obvious
