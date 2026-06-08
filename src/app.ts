@@ -18,6 +18,7 @@ import { loanHandler } from "./routes/loan.js";
 import { walletLoansHandler } from "./routes/wallet-loans.js";
 import { simulateBorrowHandler } from "./routes/simulate-borrow.js";
 import { buildBorrowHandler } from "./routes/build-borrow.js";
+import { buildRepayHandler } from "./routes/build-repay.js";
 import { creditAttestHandler } from "./routes/credit-attest.js";
 import { TIERS } from "./lib/tiers.js";
 
@@ -237,6 +238,22 @@ if (PAY_TO) {
       docsUrl: "https://github.com/magpiecapital/magpie-x402#agent-credit-attest",
     }),
     creditAttestHandler,
+  );
+
+  // Build an unsigned repay tx for an agent's loan. Closes the loop:
+  // agents can now borrow AND repay programmatically. Cheaper than
+  // build-borrow because repay is a simpler tx (no cosign, no live
+  // price oracle, no anti-exploit gauntlet — repay is universally
+  // safe and always in the user's interest).
+  app.post(
+    "/api/v1/agent/build-repay",
+    x402Required({
+      payTo: PAY_TO,
+      amountLamports: 2_000_000n, // 0.002 SOL per build
+      label: "Magpie agent repay-tx builder",
+      docsUrl: "https://github.com/magpiecapital/magpie-x402#agent-build-repay",
+    }),
+    buildRepayHandler,
   );
 } else {
   // Surfaces a clear "service misconfigured" error instead of a silent
