@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - name: Verify no secrets in source
+        run: |
+          # Defense-in-depth — block any commit that introduces obvious
+          # secret patterns even if .gitignore + .env.example are right.
+          ! grep -rinE 'bradley|lubetkin|thememebanker' \
+              --include='*.ts' --include='*.js' --include='*.json' \
+              --include='*.md' --include='*.yml' \
+              src/ api/ docs/ 2>/dev/null || \
+              (echo 'leak detected'; exit 1)
+          ! grep -rE '(api[_-]?key|private[_-]?key|secret)[[:space:]]*[:=][[:space:]]*[A-Za-z0-9]{16,}' \
+              --include='*.ts' --include='*.js' --include='*.json' \
+              src/ api/ 2>/dev/null || \
+              (echo 'hardcoded secret detected'; exit 1)
+          echo 'no leaks found'

@@ -43,9 +43,15 @@
 | GET | `/` | Free | Service info + endpoint catalog |
 | GET | `/health` | Free | Liveness check |
 | GET | `/.well-known/x402.json` | Free | Machine-readable endpoint catalog (auto-discovery) |
+| GET | `/openapi.json` | Free | OpenAPI 3.1 spec (for agent frameworks) |
+| GET | `/api/v1/pool` | Free | Live on-chain LendingPool state — totalDeposits, totalBorrowed, lifetime counters. 15s cache. |
+| GET | `/api/v1/loan/:loanId` | Free | Single loan by u64 ID. Direct Anchor account fetch. 10s cache. |
+| GET | `/api/v1/wallet/:wallet/loans?status=...` | Free | All loans owned by a wallet via `getProgramAccounts` + memcmp filter. Optional status filter. 8s cache. |
 | GET | `/api/v1/credit-score?wallet=<pubkey>` | 0.001 SOL | Magpie credit score (300–850) + tier benefits |
 
-More endpoints planned (token risk, simulated borrow quote, protocol stats snapshot, lender position data) — open an issue if you want one prioritized.
+All free endpoints query the on-chain Magpie program directly and have proper `Cache-Control` headers so CDN edges serve repeat reads without round-tripping.
+
+More paid endpoints in progress (token risk score, simulated borrow quote, batch credit lookups) — open an issue if you want one prioritized.
 
 ## How to call a paid endpoint
 
