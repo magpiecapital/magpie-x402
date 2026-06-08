@@ -17,6 +17,7 @@ import { poolHandler } from "./routes/pool.js";
 import { loanHandler } from "./routes/loan.js";
 import { walletLoansHandler } from "./routes/wallet-loans.js";
 import { simulateBorrowHandler } from "./routes/simulate-borrow.js";
+import { buildBorrowHandler } from "./routes/build-borrow.js";
 import { TIERS } from "./lib/tiers.js";
 
 const PAY_TO = process.env.MAGPIE_PAY_TO;
@@ -197,10 +198,34 @@ if (PAY_TO) {
     }),
     creditScoreHandler,
   );
+
+  // Agent-native borrow tx builder. Pays for the construction + the
+  // full server-side gate evaluation (ban registry, anti-exploit,
+  // TWAP, pool floor, cross-source price). Returns an unsigned
+  // partial-signed tx the agent then signs with their own wallet and
+  // submits via the existing cosign-borrow endpoint.
+  //
+  // Priced higher than read endpoints because it (a) does on-chain
+  // blockhash fetch + RPC writes, (b) consumes the bot's gate-eval
+  // pipeline, (c) is the high-value endpoint that completes the
+  // borrow loop autonomously.
+  app.post(
+    "/api/v1/agent/build-borrow",
+    x402Required({
+      payTo: PAY_TO,
+      amountLamports: 5_000_000n, // 0.005 SOL per build
+      label: "Magpie agent borrow-tx builder",
+      docsUrl: "https://github.com/magpiecapital/magpie-x402#agent-build-borrow",
+    }),
+    buildBorrowHandler,
+  );
 } else {
   // Surfaces a clear "service misconfigured" error instead of a silent
   // 404 when MAGPIE_PAY_TO isn't set in the environment.
   app.get("/api/v1/credit-score", (c) =>
+    c.json({ error: "service_not_configured", reason: "MAGPIE_PAY_TO not set" }, 503),
+  );
+  app.post("/api/v1/agent/build-borrow", (c) =>
     c.json({ error: "service_not_configured", reason: "MAGPIE_PAY_TO not set" }, 503),
   );
 }
