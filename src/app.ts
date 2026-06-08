@@ -19,6 +19,7 @@ import { walletLoansHandler } from "./routes/wallet-loans.js";
 import { simulateBorrowHandler } from "./routes/simulate-borrow.js";
 import { buildBorrowHandler } from "./routes/build-borrow.js";
 import { buildRepayHandler } from "./routes/build-repay.js";
+import { buildExtendHandler, buildTopupHandler, buildPartialRepayHandler } from "./routes/loan-manage.js";
 import { creditAttestHandler } from "./routes/credit-attest.js";
 import { TIERS } from "./lib/tiers.js";
 
@@ -254,6 +255,39 @@ if (PAY_TO) {
       docsUrl: "https://github.com/magpiecapital/magpie-x402#agent-build-repay",
     }),
     buildRepayHandler,
+  );
+
+  // Loan management — extend, topup, partial-repay. All same price
+  // as repay (simpler txs, no cosign, no live oracle).
+  app.post(
+    "/api/v1/agent/build-extend",
+    x402Required({
+      payTo: PAY_TO,
+      amountLamports: 2_000_000n,
+      label: "Magpie agent extend-loan-tx builder",
+      docsUrl: "https://github.com/magpiecapital/magpie-x402#agent-build-extend",
+    }),
+    buildExtendHandler,
+  );
+  app.post(
+    "/api/v1/agent/build-topup",
+    x402Required({
+      payTo: PAY_TO,
+      amountLamports: 2_000_000n,
+      label: "Magpie agent topup-collateral-tx builder",
+      docsUrl: "https://github.com/magpiecapital/magpie-x402#agent-build-topup",
+    }),
+    buildTopupHandler,
+  );
+  app.post(
+    "/api/v1/agent/build-partial-repay",
+    x402Required({
+      payTo: PAY_TO,
+      amountLamports: 2_000_000n,
+      label: "Magpie agent partial-repay-tx builder",
+      docsUrl: "https://github.com/magpiecapital/magpie-x402#agent-build-partial-repay",
+    }),
+    buildPartialRepayHandler,
   );
 } else {
   // Surfaces a clear "service misconfigured" error instead of a silent
