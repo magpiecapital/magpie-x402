@@ -16,6 +16,8 @@ import { creditScoreHandler } from "./routes/credit-score.js";
 import { poolHandler } from "./routes/pool.js";
 import { loanHandler } from "./routes/loan.js";
 import { walletLoansHandler } from "./routes/wallet-loans.js";
+import { simulateBorrowHandler } from "./routes/simulate-borrow.js";
+import { TIERS } from "./lib/tiers.js";
 
 const PAY_TO = process.env.MAGPIE_PAY_TO;
 
@@ -68,6 +70,14 @@ app.get("/health", (c) => c.json({ ok: true, ts: new Date().toISOString() }));
 app.get("/api/v1/pool", poolHandler);
 app.get("/api/v1/loan/:loanId", loanHandler);
 app.get("/api/v1/wallet/:wallet/loans", walletLoansHandler);
+app.get("/api/v1/simulate-borrow", simulateBorrowHandler);
+
+// Public tier constants — agents fetch this once and cache forever
+// (tiers are fixed at the program level; they only change on a v3
+// deploy). Free, no auth.
+app.get("/api/v1/tiers", (c) => c.json({ tiers: Object.values(TIERS) }, 200, {
+  "Cache-Control": "public, max-age=3600, s-maxage=3600",
+}));
 
 // ─── OpenAPI 3.1 spec (for agent auto-discovery) ──────────────
 // Agent ecosystems (LangChain, Crew, Letta, etc.) commonly fetch
@@ -111,6 +121,28 @@ app.get("/openapi.json", (c) => c.json({
           { name: "status", in: "query", required: false, schema: { type: "string", enum: ["active", "repaid", "liquidated"] } },
         ],
         responses: { "200": { description: "Loan list (newest-first)" } },
+      },
+    },
+    "/api/v1/tiers": {
+      get: {
+        summary: "Magpie loan tier definitions",
+        description: "Static protocol constants — fixed 3 tiers (Express / Quick / Standard). 1h cache.",
+        responses: { "200": { description: "All tier definitions" } },
+      },
+    },
+    "/api/v1/simulate-borrow": {
+      get: {
+        summary: "Preview a loan WITHOUT submitting on-chain",
+        description: "Pure-math quote from caller-supplied prices + the public tier constants. Use ?tier=all to get quotes for all three tiers side-by-side.",
+        parameters: [
+          { name: "mint", in: "query", required: true, schema: { type: "string" } },
+          { name: "amount", in: "query", required: true, schema: { type: "string", pattern: "^[0-9]+$" } },
+          { name: "decimals", in: "query", required: true, schema: { type: "string", pattern: "^[0-9]{1,2}$" } },
+          { name: "pricePerTokenUsd", in: "query", required: true, schema: { type: "string" } },
+          { name: "solPriceUsd", in: "query", required: true, schema: { type: "string" } },
+          { name: "tier", in: "query", required: false, schema: { type: "string", enum: ["express", "quick", "standard", "all"], default: "all" } },
+        ],
+        responses: { "200": { description: "BorrowQuote or { tier: 'all', quotes: [...] }" } },
       },
     },
     "/api/v1/credit-score": {
