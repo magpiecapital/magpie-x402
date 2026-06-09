@@ -23,7 +23,10 @@ jobs:
         run: |
           # Defense-in-depth — block any commit that introduces obvious
           # secret patterns even if .gitignore + .env.example are right.
-          ! grep -rinE '[redacted]|[redacted]|[redacted-dev]' \
+          # Pattern stored base64-encoded so the literal name strings
+          # don't appear in source (defeats casual grep of the public repo).
+          NAME_PATTERN=$(echo 'YnJhZGxleXxsdWJldGtpbnxicmFkbGV5bHViZXRraW58dGhlbWVtZWJhbmtlcg==' | base64 -d)
+          ! grep -rinE "$NAME_PATTERN" \
               --include='*.ts' --include='*.js' --include='*.json' \
               --include='*.md' --include='*.yml' \
               src/ api/ docs/ 2>/dev/null || \
