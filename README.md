@@ -55,6 +55,10 @@ All free endpoints query the on-chain Magpie program directly and have proper `C
 
 More paid endpoints in progress (token risk score, batch credit lookups, webhook subscriptions, MCP server) — see [MARKETING.md](./MARKETING.md) for the agent-distribution roadmap or open an issue if you want one prioritized.
 
+## Reference agents
+
+Runnable examples live in [`examples/`](./examples). They cover a borrowing agent, liquidation monitor, yield monitor, and portfolio-risk agent using the current API surface and the x402 challenge/retry flow for paid endpoints.
+
 ## How to call a paid endpoint
 
 ### Step 1 — get the challenge

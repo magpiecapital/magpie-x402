@@ -33,6 +33,7 @@
   "dependencies": {
     "@hono/node-server": "^1.13.0",
     "@solana/web3.js": "^1.95.0",
+    "dotenv": "^17.4.2",
     "hono": "^4.6.0"
   },
   "devDependencies": {

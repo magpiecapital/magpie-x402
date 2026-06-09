@@ -1,0 +1,21 @@
+{
+  "name": "magpie-x402-examples",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "borrowing": "tsx borrowing-agent/index.ts",
+    "liquidation": "tsx liquidation-bot/index.ts",
+    "yield": "tsx yield-agent/index.ts",
+    "portfolio-risk": "tsx portfolio-risk-agent/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@solana/web3.js": "1.98.4"
+  },
+  "devDependencies": {
+    "@types/node": "20.19.42",
+    "tsx": "4.22.4",
+    "typescript": "5.9.3"
+  }
+}
