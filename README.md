@@ -47,11 +47,13 @@
 | GET | `/api/v1/pool` | Free | Live on-chain LendingPool state — totalDeposits, totalBorrowed, lifetime counters. 15s cache. |
 | GET | `/api/v1/loan/:loanId` | Free | Single loan by u64 ID. Direct Anchor account fetch. 10s cache. |
 | GET | `/api/v1/wallet/:wallet/loans?status=...` | Free | All loans owned by a wallet via `getProgramAccounts` + memcmp filter. Optional status filter. 8s cache. |
+| GET | `/api/v1/collateral/eligible` | Free | Catalog of every token currently approved as Magpie collateral. First-touch for new agent integrations. 1h cache. |
+| GET | `/api/v1/markets/liquidatable` | Free | Active loans at or past their on-chain due timestamp — the canonical liquidation-bot data feed. Sorted most-past-due-first. Optional `?within_seconds=` for pre-positioning. 8s cache. |
 | GET | `/api/v1/credit-score?wallet=<pubkey>` | 0.001 SOL | Magpie credit score (300–850) + tier benefits |
 
 All free endpoints query the on-chain Magpie program directly and have proper `Cache-Control` headers so CDN edges serve repeat reads without round-tripping.
 
-More paid endpoints in progress (token risk score, simulated borrow quote, batch credit lookups) — open an issue if you want one prioritized.
+More paid endpoints in progress (token risk score, batch credit lookups, webhook subscriptions, MCP server) — see [MARKETING.md](./MARKETING.md) for the agent-distribution roadmap or open an issue if you want one prioritized.
 
 ## How to call a paid endpoint
 

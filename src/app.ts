@@ -21,6 +21,14 @@ import { buildBorrowHandler } from "./routes/build-borrow.js";
 import { buildRepayHandler } from "./routes/build-repay.js";
 import { buildExtendHandler, buildTopupHandler, buildPartialRepayHandler } from "./routes/loan-manage.js";
 import { creditAttestHandler } from "./routes/credit-attest.js";
+import {
+  createIntentHandler,
+  getIntentHandler,
+  cancelIntentHandler,
+  listIntentsHandler,
+} from "./routes/intents.js";
+import { collateralEligibleHandler } from "./routes/collateral-eligible.js";
+import { liquidatableHandler } from "./routes/liquidatable.js";
 import { TIERS } from "./lib/tiers.js";
 
 const PAY_TO = process.env.MAGPIE_PAY_TO;
@@ -31,7 +39,7 @@ const app = new Hono();
 app.use("*", secureHeaders());
 app.use("*", cors({
   origin: (process.env.CORS_ORIGINS || "*").split(",").map((s) => s.trim()),
-  allowMethods: ["GET", "HEAD", "OPTIONS"],
+  allowMethods: ["GET", "HEAD", "POST", "DELETE", "OPTIONS"],
   allowHeaders: ["Content-Type", "X-Payment", "X-Payment-Required-Scheme"],
   exposeHeaders: [
     "X-Payment-Required-Scheme",
@@ -58,6 +66,8 @@ app.get("/", (c) =>
         "GET /health",
         "GET /.well-known/x402.json",
         "GET /api/v1/pool — live on-chain LendingPool state (15s cache)",
+        "GET /api/v1/collateral/eligible — full collateral catalog (1h cache)",
+        "GET /api/v1/markets/liquidatable — past-due active loans for liquidation bots (8s cache)",
       ],
       paid: ["GET /api/v1/credit-score?wallet=<pubkey>"],
     },
@@ -75,6 +85,18 @@ app.get("/api/v1/pool", poolHandler);
 app.get("/api/v1/loan/:loanId", loanHandler);
 app.get("/api/v1/wallet/:wallet/loans", walletLoansHandler);
 app.get("/api/v1/simulate-borrow", simulateBorrowHandler);
+
+// Discovery endpoints for agents. Both free + heavily cached.
+//
+// /collateral/eligible is the canonical "what can I borrow against?"
+// answer — first-touch surface for any new agent integration.
+//
+// /markets/liquidatable is the canonical liquidation-bot data feed.
+// Liquidation racing on Solana is a real revenue path for agents, and
+// surfacing past-due-loan data prominently is how we get liquidation
+// bots to integrate Magpie.
+app.get("/api/v1/collateral/eligible", collateralEligibleHandler);
+app.get("/api/v1/markets/liquidatable", liquidatableHandler);
 
 // Public tier constants — agents fetch this once and cache forever
 // (tiers are fixed at the program level; they only change on a v3
@@ -160,6 +182,57 @@ app.get("/openapi.json", (c) => c.json({
         },
       },
     },
+    "/api/v1/agent/intent": {
+      post: {
+        summary: "Create a conditional borrow intent (paid: 0.01 SOL)",
+        description: "The wedge of agent-native lending: post an intent specifying WHEN to fire a borrow. The bot watches the condition every 30s and builds the unsigned tx when matched. Same anti-exploit gates as direct borrows.",
+        responses: {
+          "200": { description: "Intent created" },
+          "400": { description: "Validation error" },
+          "402": { description: "Payment Required" },
+          "429": { description: "Too many pending intents" },
+        },
+      },
+      get: {
+        summary: "Poll intent status (paid: 0.0005 SOL)",
+        description: "When status='matched', the response includes partial_signed_tx_b64 ready to sign + submit.",
+        parameters: [{ name: "id", in: "query", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": { description: "Intent state" },
+          "404": { description: "Not found" },
+        },
+      },
+      delete: {
+        summary: "Cancel a pending intent (free)",
+        parameters: [{ name: "id", in: "query", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Cancelled" }, "404": { description: "Not found or terminal" } },
+      },
+    },
+    "/api/v1/agent/intents": {
+      get: {
+        summary: "List intents for a wallet (paid: 0.001 SOL)",
+        parameters: [{ name: "wallet", in: "query", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Intent list (newest first, max 100)" } },
+      },
+    },
+    "/api/v1/collateral/eligible": {
+      get: {
+        summary: "Catalog of every approved collateral token",
+        description: "Public token registry — mint, symbol, decimals, category. 1h cache. First-touch endpoint for agents discovering what they can borrow against.",
+        responses: { "200": { description: "Token catalog grouped by category" } },
+      },
+    },
+    "/api/v1/markets/liquidatable": {
+      get: {
+        summary: "Active loans currently liquidatable (past due)",
+        description: "Sorted most-past-due-first. Optional within_seconds query for pre-positioning. Free — the read surface for liquidation-bot agents.",
+        parameters: [
+          { name: "within_seconds", in: "query", required: false, schema: { type: "integer", minimum: 0, maximum: 604800, default: 0 } },
+          { name: "limit", in: "query", required: false, schema: { type: "integer", minimum: 1, maximum: 500, default: 100 } },
+        ],
+        responses: { "200": { description: "Liquidatable loan list with per-loan seconds_past_due" } },
+      },
+    },
   },
 }));
 
@@ -183,6 +256,65 @@ app.get("/.well-known/x402.json", (c) =>
         priceLamports: "1000000",
         priceLabel: "0.001 SOL per lookup",
         description: "Magpie on-chain credit score (300-850) + tier benefits",
+      },
+      {
+        method: "POST",
+        path: "/api/v1/agent/intent",
+        params: {
+          borrower_wallet: "Solana pubkey",
+          collateral_mint: "Solana mint",
+          collateral_amount: "u64 string",
+          tier: "0|1|2",
+          condition_type: "price_above|price_below|time_after|pool_liq_above",
+          condition_params: "shape depends on condition_type",
+          expires_in_seconds: "optional, default 86400, max 2592000",
+        },
+        priceLamports: "10000000",
+        priceLabel: "0.01 SOL per intent",
+        description: "Post a CONDITIONAL borrow: bot watches a trigger condition (price/time/liquidity) and builds the unsigned tx when matched. Agent then polls + signs + submits. Single payment covers the entire intent lifecycle. Same anti-exploit gates as direct borrows.",
+      },
+      {
+        method: "GET",
+        path: "/api/v1/agent/intent",
+        params: { id: "intent_id from create" },
+        priceLamports: "500000",
+        priceLabel: "0.0005 SOL per poll",
+        description: "Poll the status of a conditional borrow intent. Returns partial_signed_tx_b64 + summary when status='matched'.",
+      },
+      {
+        method: "DELETE",
+        path: "/api/v1/agent/intent",
+        params: { id: "intent_id" },
+        priceLamports: "0",
+        priceLabel: "free",
+        description: "Cancel a pending conditional borrow intent.",
+      },
+      {
+        method: "GET",
+        path: "/api/v1/agent/intents",
+        params: { wallet: "Solana pubkey" },
+        priceLamports: "1000000",
+        priceLabel: "0.001 SOL per list",
+        description: "List all conditional borrow intents for a wallet (newest first, max 100).",
+      },
+      {
+        method: "GET",
+        path: "/api/v1/collateral/eligible",
+        params: {},
+        priceLamports: "0",
+        priceLabel: "free (1h cache)",
+        description: "Catalog of every token currently approved as Magpie collateral. Mint, symbol, decimals, category. First-touch endpoint for any agent integrating Magpie.",
+      },
+      {
+        method: "GET",
+        path: "/api/v1/markets/liquidatable",
+        params: {
+          within_seconds: "optional int — also include loans due within N seconds (0..604800), default 0",
+          limit: "optional int — max returned entries (1..500), default 100",
+        },
+        priceLamports: "0",
+        priceLabel: "free (8s cache)",
+        description: "Active loans at or past their on-chain due timestamp — the canonical liquidation-bot data feed. The liquidate ix is permissionless on-chain; any wallet can call it and receive the liquidator reward.",
       },
     ],
     contact: "https://github.com/magpiecapital/magpie-x402/issues",
@@ -288,6 +420,49 @@ if (PAY_TO) {
       docsUrl: "https://github.com/magpiecapital/magpie-x402#agent-build-partial-repay",
     }),
     buildPartialRepayHandler,
+  );
+
+  // ── Conditional borrow intents — "limit orders for borrows" ──
+  // The wedge that makes Magpie the first agent-native lending
+  // protocol. One paid POST reserves a watcher slot for the intent's
+  // TTL; cheap GETs let agents poll without cost concerns.
+  //
+  // CREATE: 0.01 SOL — covers the gauntlet runs throughout the
+  // intent's life + the final tx build. Single payment, no surprises.
+  app.post(
+    "/api/v1/agent/intent",
+    x402Required({
+      payTo: PAY_TO,
+      amountLamports: 10_000_000n, // 0.01 SOL per intent
+      label: "Magpie agent conditional-borrow intent",
+      docsUrl: "https://github.com/magpiecapital/magpie-x402#agent-intent",
+    }),
+    createIntentHandler,
+  );
+  // POLL: 0.0005 SOL — bot must work to fetch + serialize current
+  // state; agents typically poll every 30s.
+  app.get(
+    "/api/v1/agent/intent",
+    x402Required({
+      payTo: PAY_TO,
+      amountLamports: 500_000n,
+      label: "Magpie agent intent status",
+      docsUrl: "https://github.com/magpiecapital/magpie-x402#agent-intent",
+    }),
+    getIntentHandler,
+  );
+  // CANCEL: free. Don't tax cleanup.
+  app.delete("/api/v1/agent/intent", cancelIntentHandler);
+  // LIST: 0.001 SOL.
+  app.get(
+    "/api/v1/agent/intents",
+    x402Required({
+      payTo: PAY_TO,
+      amountLamports: 1_000_000n,
+      label: "Magpie agent intent list",
+      docsUrl: "https://github.com/magpiecapital/magpie-x402#agent-intents",
+    }),
+    listIntentsHandler,
   );
 } else {
   // Surfaces a clear "service misconfigured" error instead of a silent
