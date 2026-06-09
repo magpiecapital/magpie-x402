@@ -76,35 +76,39 @@ export async function verifyPayment(opts: {
       }
     }
   } else {
-    // SPL Token transfer of the right mint
-    const expectedMint = opts.expectedMint;
-    for (const ix of instructions) {
-      if (!("parsed" in ix)) continue;
-      const p = ix.parsed as { type?: string; info?: Record<string, unknown> };
-      const prog = ix.programId.toString();
-      const isToken =
-        prog === "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" ||
-        prog === "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
-      if (!isToken) continue;
-      if (p.type !== "transferChecked" && p.type !== "transfer") continue;
-      if (p.info?.mint !== expectedMint) continue;
-      // The destination here is the ATA — recipient owner is what we
-      // care about, but parsed instructions usually include
-      // `destination` (the ATA) not the owner. For now we accept if
-      // a token transfer to the expected mint exists for the right
-      // amount. Production should compare destination ATA to
-      // getAssociatedTokenAddressSync(expectedMint, expectedRecipient).
-      const amount = BigInt(
-        ((p.info.tokenAmount as { amount?: string } | undefined)?.amount) ??
-          (p.info.amount as string | number | undefined) ??
-          0,
-      );
-      if (amount >= opts.expectedAmountLamports) {
-        foundPayment = true;
-        payer = (p.info.authority as string) ?? (p.info.source as string);
-        break;
-      }
-    }
+    // SPL Token transfer of the right mint.
+    //
+    // SECURITY: this branch is intentionally fail-closed in v0.
+    //
+    // Parsed SPL token instructions surface `destination` as the
+    // associated token account (ATA), not the recipient owner. Verifying
+    // only mint + amount lets an attacker pay the right amount of the
+    // right mint to an ATA THEY control and present that signature as
+    // payment for ours. To safely accept SPL token payments, the
+    // destination ATA must be compared to
+    // getAssociatedTokenAddressSync(mint, expectedRecipient, true) from
+    // @solana/spl-token, which is not currently a dependency because no
+    // shipped paid endpoint uses an SPL-token price.
+    //
+    // To enable SPL-token payment routes in the future:
+    //   1. Add @solana/spl-token to dependencies.
+    //   2. Import { getAssociatedTokenAddressSync } from "@solana/spl-token".
+    //   3. Compute expectedAta = getAssociatedTokenAddressSync(
+    //        new PublicKey(expectedMint),
+    //        opts.expectedRecipient,
+    //        true,  // allowOwnerOffCurve — required for PDA recipients
+    //      ).toBase58();
+    //   4. Add `p.info.destination === expectedAta` to the checks below.
+    //   5. Verify the source ATA's owner is well-formed if you also
+    //      want to bind the payer identity.
+    //   6. Replace this fail-closed return with the existing logic.
+    //
+    // Until then, refuse SPL-token payment attempts at the verifier
+    // level rather than silently accepting an unsafe path.
+    return {
+      valid: false,
+      reason: "spl_token_payments_not_enabled",
+    };
   }
 
   if (!foundPayment) {
