@@ -10,6 +10,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { secureHeaders } from "hono/secure-headers";
+import { bodyLimit } from "hono/body-limit";
 import { x402Required } from "./middleware/x402.js";
 import { rateLimit } from "./middleware/rate-limit.js";
 import { creditScoreHandler } from "./routes/credit-score.js";
@@ -65,6 +66,24 @@ app.use("*", cors({
 app.use("*", logger());
 app.use("/api/*", rateLimit);
 app.use("/", rateLimit);
+
+// Cap request body size BEFORE any route handler buffers it. Every
+// POST/PUT body in this service is small structured JSON — the
+// largest reasonable payload is a build-borrow body with a few
+// addresses and amounts (< 2 KB). 64 KB leaves comfortable headroom
+// for future fields without giving a DoS attacker a 10 MB free
+// upload that ties up serverless memory. Returns 413 on overflow.
+app.use(
+  "/api/*",
+  bodyLimit({
+    maxSize: 64 * 1024,
+    onError: (c) =>
+      c.json(
+        { error: "payload_too_large", max_bytes: 64 * 1024 },
+        413,
+      ),
+  }),
+);
 
 // ─── Free endpoints ────────────────────────────────────────────
 app.get("/", (c) =>

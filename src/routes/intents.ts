@@ -101,7 +101,23 @@ export async function createIntentHandler(c: Context) {
   }
   try { new PublicKey(borrower); new PublicKey(mint); }
   catch { return c.json({ error: "invalid_pubkey" }, 400); }
-  if (!/^\d+$/.test(amount)) return c.json({ error: "amount_must_be_u64_string" }, 400);
+  // u64 max is 20 digits — cap so we reject e.g. a 1000-char "amount".
+  if (!/^\d{1,20}$/.test(amount)) return c.json({ error: "amount_must_be_u64_string" }, 400);
+  // expires_in_seconds: optional, but if provided must be a positive
+  // finite integer ≤ 30 days. Bot enforces this too but the edge check
+  // means a hostile client can't spam the bot with absurd values that
+  // get logged + rejected. Undefined → bot picks the default (86400).
+  let expires: number | undefined = undefined;
+  if (b.expires_in_seconds !== undefined && b.expires_in_seconds !== null) {
+    const n = Number(b.expires_in_seconds);
+    if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0 || n > 30 * 24 * 60 * 60) {
+      return c.json(
+        { error: "invalid_expires_in_seconds", detail: "must be a positive integer ≤ 2592000 (30 days)" },
+        400,
+      );
+    }
+    expires = n;
+  }
 
   return forward(c, `${BOT_API}/api/v1/agent/intent`, {
     method: "POST",
@@ -113,7 +129,7 @@ export async function createIntentHandler(c: Context) {
       tier,
       condition_type: condType,
       condition_params: condParams,
-      expires_in_seconds: b.expires_in_seconds,
+      expires_in_seconds: expires,
     }),
   });
 }
