@@ -1,0 +1,60 @@
+{
+  "name": "@magpiecapital/magpie-agent",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for Magpie x402 — the first x402-native permissionless lending protocol on Solana. Agents borrow, lend, liquidate, and post conditional intents in one line of code.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "rm -rf dist && tsc"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "magpie",
+    "solana",
+    "defi",
+    "lending",
+    "ai-agents",
+    "x402",
+    "borrow",
+    "sdk",
+    "agent-sdk"
+  ],
+  "author": "Magpie Capital",
+  "license": "MIT",
+  "homepage": "https://magpie.capital/x402",
+  "bugs": {
+    "url": "https://github.com/magpiecapital/magpie-x402/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/magpiecapital/magpie-x402.git",
+    "directory": "sdk"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.95.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.5.0"
+  }
+}
