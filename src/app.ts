@@ -13,9 +13,11 @@ import { secureHeaders } from "hono/secure-headers";
 import { x402Required } from "./middleware/x402.js";
 import { rateLimit } from "./middleware/rate-limit.js";
 import { creditScoreHandler } from "./routes/credit-score.js";
+import { creditScoreBatchHandler } from "./routes/credit-score-batch.js";
 import { poolHandler } from "./routes/pool.js";
 import { loanHandler } from "./routes/loan.js";
 import { walletLoansHandler } from "./routes/wallet-loans.js";
+import { walletHealthHandler } from "./routes/wallet-health.js";
 import { simulateBorrowHandler } from "./routes/simulate-borrow.js";
 import { buildBorrowHandler } from "./routes/build-borrow.js";
 import { buildRepayHandler } from "./routes/build-repay.js";
@@ -29,6 +31,7 @@ import {
 } from "./routes/intents.js";
 import { collateralEligibleHandler } from "./routes/collateral-eligible.js";
 import { liquidatableHandler } from "./routes/liquidatable.js";
+import { recentBorrowsHandler } from "./routes/recent-borrows.js";
 import {
   agentActivityHandler,
   protocolPulseHandler,
@@ -81,9 +84,11 @@ app.get("/", (c) =>
         "GET /api/v1/tiers — protocol tier constants (1h cache)",
         "GET /api/v1/loan/:loanId — single loan by u64 id",
         "GET /api/v1/wallet/:wallet/loans — all loans for a wallet (8s cache)",
+        "GET /api/v1/wallet/:wallet/health — per-loan and portfolio health factor (8s cache)",
         "GET /api/v1/simulate-borrow — preview a loan from caller-supplied prices (free)",
         "GET /api/v1/collateral/eligible — full collateral catalog (1h cache)",
         "GET /api/v1/markets/liquidatable — past-due active loans for liquidation bots (8s cache)",
+        "GET /api/v1/markets/recent-borrows — most recent loans across the protocol (15s cache)",
         "GET /api/v1/agent/activity — anonymized recent borrow/repay/liquidate events (15s cache)",
         "GET /api/v1/agent/protocol-pulse — 24h aggregate volume + counts (30s cache)",
         "GET /api/v1/agent/leaderboard — top wallets by Magpie credit score (60s cache)",
@@ -91,6 +96,7 @@ app.get("/", (c) =>
       ],
       paid: [
         "GET /api/v1/credit-score?wallet=<pubkey> — 0.001 SOL",
+        "POST /api/v1/credit-score/batch — batch credit-score lookups (0.02 SOL flat, max 50 wallets)",
         "GET /api/v1/agent/token-risk?mint=<pubkey> — 0.001 SOL (per-token risk profile)",
         "GET /api/v1/agent/credit-attest?wallet=<pubkey> — 0.0005 SOL (signed, portable)",
         "POST /api/v1/agent/build-borrow — 0.005 SOL (full anti-exploit gate eval)",
@@ -120,6 +126,7 @@ app.get("/health", (c) => c.json({ ok: true, ts: new Date().toISOString() }));
 app.get("/api/v1/pool", poolHandler);
 app.get("/api/v1/loan/:loanId", loanHandler);
 app.get("/api/v1/wallet/:wallet/loans", walletLoansHandler);
+app.get("/api/v1/wallet/:wallet/health", walletHealthHandler);
 app.get("/api/v1/simulate-borrow", simulateBorrowHandler);
 
 // Discovery endpoints for agents. Both free + heavily cached.
@@ -133,6 +140,7 @@ app.get("/api/v1/simulate-borrow", simulateBorrowHandler);
 // bots to integrate Magpie.
 app.get("/api/v1/collateral/eligible", collateralEligibleHandler);
 app.get("/api/v1/markets/liquidatable", liquidatableHandler);
+app.get("/api/v1/markets/recent-borrows", recentBorrowsHandler);
 
 // Social-proof endpoints. Both free, both heavily cached. /activity
 // is the canonical "is this protocol alive?" feed for arriving agents;
@@ -511,6 +519,20 @@ if (PAY_TO) {
       docsUrl: "https://github.com/magpiecapital/magpie-x402#credit-score",
     }),
     creditScoreHandler,
+  );
+
+  // Batch credit-score lookup — max 50 wallets per request.
+  // Flat 0.02 SOL covers the mid-range case; pricing is a single
+  // x402 payment regardless of batch size.
+  app.post(
+    "/api/v1/credit-score/batch",
+    x402Required({
+      payTo: PAY_TO,
+      amountLamports: 20_000_000n, // 0.02 SOL flat per batch
+      label: "Magpie batch credit-score lookup",
+      docsUrl: "https://github.com/magpiecapital/magpie-x402#credit-score-batch",
+    }),
+    creditScoreBatchHandler,
   );
 
   // Agent-native borrow tx builder. Pays for the construction + the
