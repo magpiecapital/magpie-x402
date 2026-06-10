@@ -1,0 +1,82 @@
+version: 2
+
+# Dependabot configuration.
+#
+# Strategy:
+#   - Security patches: HIGHEST priority. Auto-open a PR the moment a
+#     vulnerable version is detected. No grouping, no schedule —
+#     security alerts fire immediately and PR fires immediately.
+#   - Non-security version bumps: weekly, GROUPED by ecosystem so the
+#     operator gets one consolidated PR per ecosystem per week instead
+#     of dozens of individual PRs.
+#   - Open-PR limit prevents Dependabot from creating PRs faster than
+#     the operator can review them. 10 per ecosystem is generous.
+#
+# Operator reviews + merges every PR by hand. No auto-merge —
+# automatic dependency merging is itself a supply-chain risk
+# (a compromised maintainer could push a malicious patch version
+# and we'd auto-merge it).
+
+updates:
+  # Root x402 service
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/Chicago"
+    open-pull-requests-limit: 10
+    groups:
+      production-deps:
+        applies-to: version-updates
+        dependency-type: "production"
+        update-types: ["patch", "minor"]
+      dev-deps:
+        applies-to: version-updates
+        dependency-type: "development"
+        update-types: ["patch", "minor"]
+    labels:
+      - "dependencies"
+      - "x402"
+
+  # MCP server
+  - package-ecosystem: "npm"
+    directory: "/mcp"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      mcp-deps:
+        applies-to: version-updates
+        update-types: ["patch", "minor"]
+    labels:
+      - "dependencies"
+      - "mcp"
+
+  # Yield-bot reference agent
+  - package-ecosystem: "npm"
+    directory: "/agents/yield-bot"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      yield-bot-deps:
+        applies-to: version-updates
+        update-types: ["patch", "minor"]
+    labels:
+      - "dependencies"
+      - "yield-bot"
+
+  # GitHub Actions themselves (pinned-SHA bumps when new releases land)
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
