@@ -49,11 +49,16 @@
 | GET | `/api/v1/wallet/:wallet/loans?status=...` | Free | All loans owned by a wallet via `getProgramAccounts` + memcmp filter. Optional status filter. 8s cache. |
 | GET | `/api/v1/collateral/eligible` | Free | Catalog of every token currently approved as Magpie collateral. First-touch for new agent integrations. 1h cache. |
 | GET | `/api/v1/markets/liquidatable` | Free | Active loans at or past their on-chain due timestamp — the canonical liquidation-bot data feed. Sorted most-past-due-first. Optional `?within_seconds=` for pre-positioning. 8s cache. |
+| GET | `/api/v1/agent/activity` | Free | Anonymized recent borrow/repay/liquidate events. First-touch "is this protocol alive?" feed for arriving agents. 15s cache. |
+| GET | `/api/v1/agent/protocol-pulse` | Free | 24h aggregates: active loans, active borrowers, borrow volume, liquidations. 30s cache. |
+| GET | `/api/v1/agent/leaderboard` | Free | Top wallets by Magpie credit score, anonymized. 60s cache. |
 | GET | `/api/v1/credit-score?wallet=<pubkey>` | 0.001 SOL | Magpie credit score (300–850) + tier benefits |
 
 All free endpoints query the on-chain Magpie program directly and have proper `Cache-Control` headers so CDN edges serve repeat reads without round-tripping.
 
-More paid endpoints in progress (token risk score, batch credit lookups, webhook subscriptions, MCP server) — see [MARKETING.md](./MARKETING.md) for the agent-distribution roadmap or open an issue if you want one prioritized.
+> 👉 **New to this API?** Start at [`/examples/`](./examples/) — five turn-key TypeScript agents (credit-score fetch, liquidation bot, full agent borrow loop, conditional intent, loan monitor) that talk to the live production endpoint. Each is a single file, depends only on `@solana/web3.js`, runs with `npx tsx`.
+
+More paid endpoints in progress (token risk score, batch credit lookups, webhook subscriptions, MCP server, LP-side build-deposit / build-withdraw) — see [MARKETING.md](./MARKETING.md) for the agent-distribution roadmap or open an issue if you want one prioritized.
 
 ## How to call a paid endpoint
 

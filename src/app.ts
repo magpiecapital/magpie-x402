@@ -29,6 +29,11 @@ import {
 } from "./routes/intents.js";
 import { collateralEligibleHandler } from "./routes/collateral-eligible.js";
 import { liquidatableHandler } from "./routes/liquidatable.js";
+import {
+  agentActivityHandler,
+  protocolPulseHandler,
+  leaderboardHandler,
+} from "./routes/agent-activity.js";
 import { TIERS } from "./lib/tiers.js";
 
 const PAY_TO = process.env.MAGPIE_PAY_TO;
@@ -65,11 +70,31 @@ app.get("/", (c) =>
       free: [
         "GET /health",
         "GET /.well-known/x402.json",
+        "GET /openapi.json",
         "GET /api/v1/pool — live on-chain LendingPool state (15s cache)",
+        "GET /api/v1/tiers — protocol tier constants (1h cache)",
+        "GET /api/v1/loan/:loanId — single loan by u64 id",
+        "GET /api/v1/wallet/:wallet/loans — all loans for a wallet (8s cache)",
+        "GET /api/v1/simulate-borrow — preview a loan from caller-supplied prices (free)",
         "GET /api/v1/collateral/eligible — full collateral catalog (1h cache)",
         "GET /api/v1/markets/liquidatable — past-due active loans for liquidation bots (8s cache)",
+        "GET /api/v1/agent/activity — anonymized recent borrow/repay/liquidate events (15s cache)",
+        "GET /api/v1/agent/protocol-pulse — 24h aggregate volume + counts (30s cache)",
+        "GET /api/v1/agent/leaderboard — top wallets by Magpie credit score (60s cache)",
       ],
-      paid: ["GET /api/v1/credit-score?wallet=<pubkey>"],
+      paid: [
+        "GET /api/v1/credit-score?wallet=<pubkey> — 0.001 SOL",
+        "GET /api/v1/agent/credit-attest?wallet=<pubkey> — 0.0005 SOL (signed, portable)",
+        "POST /api/v1/agent/build-borrow — 0.005 SOL (full anti-exploit gate eval)",
+        "POST /api/v1/agent/build-repay — 0.002 SOL",
+        "POST /api/v1/agent/build-extend — 0.002 SOL",
+        "POST /api/v1/agent/build-topup — 0.002 SOL",
+        "POST /api/v1/agent/build-partial-repay — 0.002 SOL",
+        "POST /api/v1/agent/intent — 0.01 SOL (conditional borrow, single payment for lifecycle)",
+        "GET /api/v1/agent/intent?id=<intent_id> — 0.0005 SOL",
+        "GET /api/v1/agent/intents?wallet=<pubkey> — 0.001 SOL",
+      ],
+      examples: "https://github.com/magpiecapital/magpie-x402/tree/main/examples",
     },
     repository: "https://github.com/magpiecapital/magpie-x402",
   }),
@@ -97,6 +122,15 @@ app.get("/api/v1/simulate-borrow", simulateBorrowHandler);
 // bots to integrate Magpie.
 app.get("/api/v1/collateral/eligible", collateralEligibleHandler);
 app.get("/api/v1/markets/liquidatable", liquidatableHandler);
+
+// Social-proof endpoints. Both free, both heavily cached. /activity
+// is the canonical "is this protocol alive?" feed for arriving agents;
+// /protocol-pulse is the 24h aggregate ("how much volume?"); /leaderboard
+// is the credit-score-ranked top wallets. All anonymized — wallets
+// reduced to `Xxxx…Yyyy`, never any Telegram or off-chain identity.
+app.get("/api/v1/agent/activity", agentActivityHandler);
+app.get("/api/v1/agent/protocol-pulse", protocolPulseHandler);
+app.get("/api/v1/agent/leaderboard", leaderboardHandler);
 
 // Public tier constants — agents fetch this once and cache forever
 // (tiers are fixed at the program level; they only change on a v3
@@ -233,6 +267,30 @@ app.get("/openapi.json", (c) => c.json({
         responses: { "200": { description: "Liquidatable loan list with per-loan seconds_past_due" } },
       },
     },
+    "/api/v1/agent/activity": {
+      get: {
+        summary: "Anonymized recent protocol activity stream",
+        description: "Last N borrow/repay/liquidate events. Wallets anonymized to Xxxx…Yyyy. No PII. The first-touch 'is this protocol alive' feed for new agents and third-party monitors. Free — 15s cache.",
+        parameters: [
+          { name: "limit", in: "query", required: false, schema: { type: "integer", minimum: 1, maximum: 200, default: 50 } },
+        ],
+        responses: { "200": { description: "Activity stream (newest-first)" } },
+      },
+    },
+    "/api/v1/agent/protocol-pulse": {
+      get: {
+        summary: "24h protocol aggregates",
+        description: "Active loans, active borrowers, borrow volume and counts over 24h + 1h windows, liquidation counts. Pure numbers, no per-wallet data. Free — 30s cache.",
+        responses: { "200": { description: "Aggregate counts + volume" } },
+      },
+    },
+    "/api/v1/agent/leaderboard": {
+      get: {
+        summary: "Top wallets by Magpie credit score",
+        description: "Top 20 wallets ranked by credit score. Anonymized to Xxxx…Yyyy. Free — 60s cache.",
+        responses: { "200": { description: "Credit leaderboard" } },
+      },
+    },
   },
 }));
 
@@ -316,8 +374,33 @@ app.get("/.well-known/x402.json", (c) =>
         priceLabel: "free (8s cache)",
         description: "Active loans at or past their on-chain due timestamp — the canonical liquidation-bot data feed. The liquidate ix is permissionless on-chain; any wallet can call it and receive the liquidator reward.",
       },
+      {
+        method: "GET",
+        path: "/api/v1/agent/activity",
+        params: { limit: "optional int (1..200), default 50" },
+        priceLamports: "0",
+        priceLabel: "free (15s cache)",
+        description: "Anonymized recent protocol activity — borrows, repays, liquidations. Wallets reduced to Xxxx…Yyyy short forms. First-touch 'is this protocol alive' feed for arriving agents.",
+      },
+      {
+        method: "GET",
+        path: "/api/v1/agent/protocol-pulse",
+        params: {},
+        priceLamports: "0",
+        priceLabel: "free (30s cache)",
+        description: "24h protocol aggregates — active loans, active borrowers, borrow volume, liquidation counts. Pure numbers, no per-wallet data.",
+      },
+      {
+        method: "GET",
+        path: "/api/v1/agent/leaderboard",
+        params: {},
+        priceLamports: "0",
+        priceLabel: "free (60s cache)",
+        description: "Top wallets by Magpie credit score, anonymized.",
+      },
     ],
     contact: "https://github.com/magpiecapital/magpie-x402/issues",
+    examples: "https://github.com/magpiecapital/magpie-x402/tree/main/examples",
   }),
 );
 
