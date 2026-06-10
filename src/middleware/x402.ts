@@ -141,6 +141,57 @@ export function x402Required(config: X402Config): MiddlewareHandler {
       payer: verification.payer,
       mintedAtMs: nonceCheck.mintedAtMs,
     });
+
+    // Fire-and-forget metrics recording. Non-blocking: if the bot is
+    // momentarily unreachable or the record fails for any reason, the
+    // paid call still goes through. The metric is downstream of the
+    // billing fact (the SOL transfer is the source of truth).
+    void recordPaidCall({
+      endpointPath: endpoint,
+      method: c.req.method,
+      amountLamports: config.amountLamports.toString(),
+      payerPubkey: verification.payer ?? "",
+      txSignature: sig,
+      nonce: memoNonce,
+    });
+
     await next();
   };
+}
+
+// Fire-and-forget. Errors swallowed — metrics are best-effort.
+// 3s timeout caps per-invocation latency contribution to ~0ms in the
+// happy path (we don't await) and 3s upper bound if a Promise leak
+// somehow tries to drain it.
+const BOT_API_FOR_METRICS = process.env.MAGPIE_BOT_API || "https://api.magpie.capital";
+const INTERNAL_TOKEN_FOR_METRICS = process.env.INTERNAL_API_TOKEN || "";
+async function recordPaidCall(rec: {
+  endpointPath: string;
+  method: string;
+  amountLamports: string;
+  payerPubkey: string;
+  txSignature: string;
+  nonce: string;
+}): Promise<void> {
+  if (!INTERNAL_TOKEN_FOR_METRICS) return; // nothing to do without auth
+  try {
+    await fetch(`${BOT_API_FOR_METRICS}/api/v1/internal/x402/record`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Internal-Token": INTERNAL_TOKEN_FOR_METRICS,
+      },
+      body: JSON.stringify({
+        endpoint_path: rec.endpointPath,
+        method: rec.method,
+        amount_lamports: rec.amountLamports,
+        payer_pubkey: rec.payerPubkey,
+        tx_signature: rec.txSignature,
+        nonce: rec.nonce,
+      }),
+      signal: AbortSignal.timeout(3_000),
+    });
+  } catch {
+    // Silent — metrics are best-effort.
+  }
 }
