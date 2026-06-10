@@ -168,6 +168,16 @@ const TOOLS = [
     },
   },
   {
+    name: "magpie_token_risk",
+    description:
+      "Per-token risk profile from Magpie's internal risk engine — risk score (0-100), dimension breakdown (volatility, liquidity, concentration, volume, rug_pull), market data, max allowed LTV the program will enforce, operator flags. Useful pre-borrow collateral check. Paid: 0.001 SOL per lookup.",
+    inputSchema: {
+      type: "object",
+      properties: { mint: { type: "string" } },
+      required: ["mint"],
+    },
+  },
+  {
     name: "magpie_build_borrow",
     description:
       "Build an UNSIGNED borrow transaction. Server runs the full anti-exploit gate eval (ban registry, TWAP, pool floor, cross-source price, RWA-only guard, etc.) and returns a partial-signed tx. Agent signs locally and submits to magpie.capital/api/v1/cosign-borrow. Paid: 0.005 SOL.",
@@ -341,6 +351,11 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       case "magpie_credit_score":
         result = await call(ctx, "GET", "/api/v1/credit-score", {
           query: { wallet: String(a.wallet) },
+        });
+        break;
+      case "magpie_token_risk":
+        result = await call(ctx, "GET", "/api/v1/agent/token-risk", {
+          query: { mint: String(a.mint) },
         });
         break;
       case "magpie_build_borrow":

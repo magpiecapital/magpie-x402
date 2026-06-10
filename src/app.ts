@@ -39,6 +39,7 @@ import {
   buildWithdrawHandler,
   lpStateHandler,
 } from "./routes/agent-lp.js";
+import { tokenRiskHandler } from "./routes/token-risk.js";
 import { TIERS } from "./lib/tiers.js";
 
 const PAY_TO = process.env.MAGPIE_PAY_TO;
@@ -90,6 +91,7 @@ app.get("/", (c) =>
       ],
       paid: [
         "GET /api/v1/credit-score?wallet=<pubkey> — 0.001 SOL",
+        "GET /api/v1/agent/token-risk?mint=<pubkey> — 0.001 SOL (per-token risk profile)",
         "GET /api/v1/agent/credit-attest?wallet=<pubkey> — 0.0005 SOL (signed, portable)",
         "POST /api/v1/agent/build-borrow — 0.005 SOL (full anti-exploit gate eval)",
         "POST /api/v1/agent/build-repay — 0.002 SOL",
@@ -312,6 +314,18 @@ app.get("/openapi.json", (c) => c.json({
         responses: { "200": { description: "Position + pool context" } },
       },
     },
+    "/api/v1/agent/token-risk": {
+      get: {
+        summary: "Per-token risk profile (paid 0.001 SOL)",
+        description: "Risk score (0-100), dimension breakdown (volatility, liquidity, concentration, volume, rug_pull), market data, lending impact (max allowed LTV the program will actually enforce), operator flags. Useful for an agent's collateral-selection step before posting a build-borrow.",
+        parameters: [{ name: "mint", in: "query", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": { description: "Token risk profile" },
+          "402": { description: "Payment Required" },
+          "404": { description: "No risk profile for this mint" },
+        },
+      },
+    },
     "/api/v1/agent/build-deposit": {
       post: {
         summary: "Build an unsigned LP-deposit tx (paid 0.002 SOL)",
@@ -448,6 +462,14 @@ app.get("/.well-known/x402.json", (c) =>
         priceLamports: "0",
         priceLabel: "free (10s cache)",
         description: "Depositor position state + pool context — shares, deposited lamports, current value, yield earned, share-of-pool.",
+      },
+      {
+        method: "GET",
+        path: "/api/v1/agent/token-risk",
+        params: { mint: "Solana mint pubkey (base58)" },
+        priceLamports: "1000000",
+        priceLabel: "0.001 SOL per lookup",
+        description: "Magpie's internal token risk profile — score, dimensions, market data, lending impact, operator flags. Pre-borrow collateral-selection signal.",
       },
       {
         method: "POST",
@@ -603,6 +625,23 @@ if (PAY_TO) {
       docsUrl: "https://github.com/magpiecapital/magpie-x402#agent-build-withdraw",
     }),
     buildWithdrawHandler,
+  );
+
+  // ── Token risk score ──
+  // Per-token risk profile from Magpie's internal risk engine. Useful
+  // for agents picking collateral before posting a build-borrow.
+  // Priced same as credit-score (0.001 SOL) — both are scoring lookups
+  // that compress non-trivial protocol intelligence into a single
+  // decision input.
+  app.get(
+    "/api/v1/agent/token-risk",
+    x402Required({
+      payTo: PAY_TO,
+      amountLamports: 1_000_000n,
+      label: "Magpie token risk score",
+      docsUrl: "https://github.com/magpiecapital/magpie-x402#agent-token-risk",
+    }),
+    tokenRiskHandler,
   );
 
   // ── Conditional borrow intents — "limit orders for borrows" ──

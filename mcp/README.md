@@ -6,7 +6,7 @@ Drop one config block into your host and your agent can query Magpie's protocol 
 
 ## What it exposes
 
-17 tools wrapping the x402 endpoints:
+18 tools wrapping the x402 endpoints:
 
 **Free reads (work out of the box):**
 - `magpie_pool_state` — live LendingPool account
@@ -23,6 +23,7 @@ Drop one config block into your host and your agent can query Magpie's protocol 
 
 **Paid (require a configured Solana keypair):**
 - `magpie_credit_score` — 0.001 SOL
+- `magpie_token_risk` — 0.001 SOL (per-token risk profile)
 - `magpie_build_borrow` — 0.005 SOL
 - `magpie_build_repay` — 0.002 SOL
 - `magpie_build_deposit` — 0.002 SOL
