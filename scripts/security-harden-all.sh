@@ -13,16 +13,26 @@
 
 set -euo pipefail
 
-# Per-repo CI contexts that must pass before merge. Empty array means
-# don't require any specific check (only PR review + linear history).
-declare -A REPO_CONTEXTS=(
-  [magpie-x402]='["typecheck"]'
-  [magpie-site]='[]'
-  [magpie-bot]='["leak-check"]'
-  [magpie-marketing]='[]'
-  [magpie-partners]='[]'
-)
+# Per-repo CI contexts that must pass before merge. Empty JSON array
+# means don't require any specific check (only PR review + linear
+# history). Stored as parallel arrays for bash-3 compatibility — macOS
+# ships bash 3.2 which doesn't support `declare -A` associative arrays.
+REPOS=(magpie-x402 magpie-site magpie-bot magpie-marketing magpie-partners)
+CONTEXTS=('["typecheck"]' '[]' '["leak-check"]' '[]' '[]')
 PUBLIC_REPOS=(magpie-x402 magpie-site magpie-bot)
+
+# Helper — look up the contexts entry for a given repo.
+get_contexts() {
+  local repo=$1
+  local i
+  for i in "${!REPOS[@]}"; do
+    if [ "${REPOS[$i]}" = "$repo" ]; then
+      echo "${CONTEXTS[$i]}"
+      return
+    fi
+  done
+  echo "[]"
+}
 
 harden_repo() {
   local repo=$1
@@ -93,8 +103,8 @@ echo "════════════════════════�
 echo " Magpie repo hardening — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "══════════════════════════════════════════════"
 
-for repo in "${!REPO_CONTEXTS[@]}"; do
-  harden_repo "$repo" "${REPO_CONTEXTS[$repo]}"
+for i in "${!REPOS[@]}"; do
+  harden_repo "${REPOS[$i]}" "${CONTEXTS[$i]}"
 done
 
 echo ""
