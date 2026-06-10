@@ -36,6 +36,7 @@ npx tsx examples/01-fetch-credit-score.ts <WALLET_PUBKEY>
 | [07-collateral-screener.ts](./07-collateral-screener.ts) | 0.001 SOL × tokens scanned | `GET /collateral/eligible` + `GET /agent/token-risk` | Walks the catalog, fetches risk profile per mint, prints tokens passing your safety threshold |
 | [08-liquidation-keeper.ts](./08-liquidation-keeper.ts) | 0.003 SOL per attempt | `GET /markets/liquidatable` + `POST /agent/build-liquidate` | Full liquidation loop: poll the feed, pick most-past-due, build → sign → submit. Keeper bounty paid in collateral token. |
 | [09-webhook-receiver.ts](./09-webhook-receiver.ts) | 0.01 SOL one-shot | `POST /agent/intent` with `webhook_url` | Push notification on intent.matched — zero polling cost. HMAC-SHA256 signature verified constant-time. Compare to polling: 0.0005 SOL × 30s intervals = up to 0.06 SOL/hr saved. |
+| [10-equity-leverage-bot.ts](./10-equity-leverage-bot.ts) | 0.005 + 0.01 SOL | `simulate-borrow` → `build-borrow` → `intent` | **Premium Tier preview** — borrow SOL against tokenized equity (NVDAx/COINx/etc) without selling. Posts a 10%-drop stop-loss intent. Works today on standard catalog mints; switches to equity collateral the day Premium Tier ships. |
 
 ## Costs at a glance
 
