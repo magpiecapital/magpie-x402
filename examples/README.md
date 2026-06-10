@@ -34,6 +34,7 @@ npx tsx examples/01-fetch-credit-score.ts <WALLET_PUBKEY>
 | [05-loan-monitor.ts](./05-loan-monitor.ts) | free | `GET /wallet/:wallet/loans` | Watch your loans, warn before due |
 | [06-yield-agent.ts](./06-yield-agent.ts) | 0.002 SOL per build | `GET /agent/lp-state` + `POST /agent/build-deposit` / `build-withdraw` | Full LP loop: read position, deposit SOL, withdraw shares |
 | [07-collateral-screener.ts](./07-collateral-screener.ts) | 0.001 SOL × tokens scanned | `GET /collateral/eligible` + `GET /agent/token-risk` | Walks the catalog, fetches risk profile per mint, prints tokens passing your safety threshold |
+| [08-liquidation-keeper.ts](./08-liquidation-keeper.ts) | 0.003 SOL per attempt | `GET /markets/liquidatable` + `POST /agent/build-liquidate` | Full liquidation loop: poll the feed, pick most-past-due, build → sign → submit. Keeper bounty paid in collateral token. |
 
 ## Costs at a glance
 

@@ -6,7 +6,7 @@ Drop one config block into your host and your agent can query Magpie's protocol 
 
 ## What it exposes
 
-18 tools wrapping the x402 endpoints:
+19 tools wrapping the x402 endpoints:
 
 **Free reads (work out of the box):**
 - `magpie_pool_state` — live LendingPool account
@@ -28,6 +28,7 @@ Drop one config block into your host and your agent can query Magpie's protocol 
 - `magpie_build_repay` — 0.002 SOL
 - `magpie_build_deposit` — 0.002 SOL
 - `magpie_build_withdraw` — 0.002 SOL
+- `magpie_build_liquidate` — 0.003 SOL (liquidate a past-due loan, receive keeper bounty)
 - `magpie_create_intent` — 0.01 SOL (conditional borrow)
 - `magpie_get_intent` — 0.0005 SOL (poll)
 

@@ -39,6 +39,7 @@ import {
   buildWithdrawHandler,
   lpStateHandler,
 } from "./routes/agent-lp.js";
+import { buildLiquidateHandler } from "./routes/agent-liquidate.js";
 import { tokenRiskHandler } from "./routes/token-risk.js";
 import { TIERS } from "./lib/tiers.js";
 
@@ -100,6 +101,7 @@ app.get("/", (c) =>
         "POST /api/v1/agent/build-partial-repay — 0.002 SOL",
         "POST /api/v1/agent/build-deposit — 0.002 SOL (LP — deposit SOL into the LendingPool)",
         "POST /api/v1/agent/build-withdraw — 0.002 SOL (LP — withdraw shares)",
+        "POST /api/v1/agent/build-liquidate — 0.003 SOL (liquidate a past-due loan, receive keeper bounty)",
         "POST /api/v1/agent/intent — 0.01 SOL (conditional borrow, single payment for lifecycle)",
         "GET /api/v1/agent/intent?id=<intent_id> — 0.0005 SOL",
         "GET /api/v1/agent/intents?wallet=<pubkey> — 0.001 SOL",
@@ -314,6 +316,18 @@ app.get("/openapi.json", (c) => c.json({
         responses: { "200": { description: "Position + pool context" } },
       },
     },
+    "/api/v1/agent/build-liquidate": {
+      post: {
+        summary: "Build an unsigned liquidate-loan tx (paid 0.003 SOL)",
+        description: "Permissionless on the Anchor side — any wallet can sign and submit. The keeper (the agent's wallet) receives keeper_reward_bps of the seized collateral; the rest goes to the lender authority for pool recovery. Server pre-validates the loan exists, is active, and is past due before building.",
+        responses: {
+          "200": { description: "partial_signed_tx_b64 + summary + keeper_reward_info" },
+          "400": { description: "Validation error or loan not yet due" },
+          "402": { description: "Payment Required" },
+          "404": { description: "loan_not_active" },
+        },
+      },
+    },
     "/api/v1/agent/token-risk": {
       get: {
         summary: "Per-token risk profile (paid 0.001 SOL)",
@@ -462,6 +476,17 @@ app.get("/.well-known/x402.json", (c) =>
         priceLamports: "0",
         priceLabel: "free (10s cache)",
         description: "Depositor position state + pool context — shares, deposited lamports, current value, yield earned, share-of-pool.",
+      },
+      {
+        method: "POST",
+        path: "/api/v1/agent/build-liquidate",
+        params: {
+          keeper: "Solana pubkey (base58) — the agent's wallet, will sign + receive the keeper bounty",
+          loan_pda: "Solana pubkey (base58) — loan PDA from /api/v1/markets/liquidatable",
+        },
+        priceLamports: "3000000",
+        priceLabel: "0.003 SOL per build",
+        description: "Build an unsigned liquidate-loan tx for a past-due active loan. Keeper receives keeper_reward_bps share of seized collateral; rest goes to lender authority. Server pre-validates loan status + due time before building.",
       },
       {
         method: "GET",
@@ -625,6 +650,25 @@ if (PAY_TO) {
       docsUrl: "https://github.com/magpiecapital/magpie-x402#agent-build-withdraw",
     }),
     buildWithdrawHandler,
+  );
+
+  // ── Build-liquidate ──
+  // Closes the liquidation-bot loop. Agents see liquidatable loans via
+  // /api/v1/markets/liquidatable (free); this endpoint builds the
+  // unsigned tx so they don't have to roll their own Anchor client.
+  // Priced 0.003 SOL — slightly above the 0.002 SOL build-builders
+  // because the server does extra RPC (Loan account fetch + mint
+  // account fetch to detect token program) and the per-liquidation
+  // upside for the agent is materially higher than a deposit/withdraw.
+  app.post(
+    "/api/v1/agent/build-liquidate",
+    x402Required({
+      payTo: PAY_TO,
+      amountLamports: 3_000_000n,
+      label: "Magpie agent liquidate-tx builder",
+      docsUrl: "https://github.com/magpiecapital/magpie-x402#agent-build-liquidate",
+    }),
+    buildLiquidateHandler,
   );
 
   // ── Token risk score ──

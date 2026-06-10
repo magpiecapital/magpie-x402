@@ -231,6 +231,19 @@ const TOOLS = [
     },
   },
   {
+    name: "magpie_build_liquidate",
+    description:
+      "Build an unsigned liquidate-loan tx for a past-due active loan. The keeper (your wallet) receives keeper_reward_bps share of the seized collateral as bounty; the rest goes to the lender authority for pool recovery. Permissionless — any wallet can liquidate. Server pre-validates the loan exists, is active, and is past due. Paid: 0.003 SOL. Workflow: poll magpie_liquidatable to find candidates, then call this on the loan_pda.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        keeper: { type: "string" },
+        loan_pda: { type: "string" },
+      },
+      required: ["keeper", "loan_pda"],
+    },
+  },
+  {
     name: "magpie_create_intent",
     description:
       "Post a CONDITIONAL borrow intent. Bot watches the trigger condition (price_above / price_below / time_after / pool_liq_above) and builds the unsigned tx when matched. Single payment covers entire intent lifecycle. Paid: 0.01 SOL.",
@@ -369,6 +382,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         break;
       case "magpie_build_withdraw":
         result = await call(ctx, "POST", "/api/v1/agent/build-withdraw", { body: a });
+        break;
+      case "magpie_build_liquidate":
+        result = await call(ctx, "POST", "/api/v1/agent/build-liquidate", { body: a });
         break;
       case "magpie_create_intent":
         result = await call(ctx, "POST", "/api/v1/agent/intent", { body: a });
