@@ -1,0 +1,36 @@
+{
+  "name": "@magpiecapital/magpie-mcp",
+  "version": "0.1.0",
+  "description": "MCP server exposing Magpie Capital's x402 API as native tools for Claude Desktop, Cursor, Windsurf, and any MCP-aware agent host.",
+  "type": "module",
+  "bin": {
+    "magpie-mcp": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": ["mcp", "magpie", "solana", "defi", "ai-agents", "x402"],
+  "author": "Magpie Capital",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/magpiecapital/magpie-x402.git",
+    "directory": "mcp"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@solana/web3.js": "^1.95.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.5.0"
+  }
+}

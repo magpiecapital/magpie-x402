@@ -59,7 +59,9 @@
 
 All free endpoints query the on-chain Magpie program directly and have proper `Cache-Control` headers so CDN edges serve repeat reads without round-tripping.
 
-> 👉 **New to this API?** Start at [`/examples/`](./examples/) — five turn-key TypeScript agents (credit-score fetch, liquidation bot, full agent borrow loop, conditional intent, loan monitor) that talk to the live production endpoint. Each is a single file, depends only on `@solana/web3.js`, runs with `npx tsx`.
+> 👉 **New to this API?** Start at [`/examples/`](./examples/) — six turn-key TypeScript agents (credit-score fetch, liquidation bot, full agent borrow loop, conditional intent, loan monitor, yield agent) that talk to the live production endpoint. Each is a single file, depends only on `@solana/web3.js`, runs with `npx tsx`.
+>
+> 🧩 **Using Claude Desktop, Cursor, Windsurf, or ChatGPT desktop?** [`/mcp/`](./mcp/) ships a one-config-block MCP server that exposes the full API as native tools in your agent host. Free reads work without any keypair; paid endpoints sign x402 payments locally with a configured Solana wallet.
 
 More paid endpoints in progress (token risk score, batch credit lookups, webhook subscriptions, MCP server, LP-side build-deposit / build-withdraw) — see [MARKETING.md](./MARKETING.md) for the agent-distribution roadmap or open an issue if you want one prioritized.
 

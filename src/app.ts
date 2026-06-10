@@ -103,6 +103,7 @@ app.get("/", (c) =>
         "GET /api/v1/agent/intents?wallet=<pubkey> — 0.001 SOL",
       ],
       examples: "https://github.com/magpiecapital/magpie-x402/tree/main/examples",
+      mcp_server: "https://github.com/magpiecapital/magpie-x402/tree/main/mcp",
     },
     repository: "https://github.com/magpiecapital/magpie-x402",
   }),
@@ -473,6 +474,7 @@ app.get("/.well-known/x402.json", (c) =>
     ],
     contact: "https://github.com/magpiecapital/magpie-x402/issues",
     examples: "https://github.com/magpiecapital/magpie-x402/tree/main/examples",
+    mcp_server: "https://github.com/magpiecapital/magpie-x402/tree/main/mcp",
   }),
 );
 
