@@ -236,10 +236,10 @@ app.get("/openapi.json", (c) => c.json({
     "/api/v1/agent/intent": {
       post: {
         summary: "Create a conditional borrow intent (paid: 0.01 SOL)",
-        description: "The wedge of agent-native lending: post an intent specifying WHEN to fire a borrow. The bot watches the condition every 30s and builds the unsigned tx when matched. Same anti-exploit gates as direct borrows.",
+        description: "The wedge of agent-native lending: post an intent specifying WHEN to fire a borrow. The bot watches the condition every 30s and builds the unsigned tx when matched. Same anti-exploit gates as direct borrows. Optional webhook_url for push delivery — server POSTs an HMAC-signed payload when matched, eliminating poll cost. The webhook_secret is returned ONCE at create time.",
         responses: {
-          "200": { description: "Intent created" },
-          "400": { description: "Validation error" },
+          "200": { description: "Intent created (optionally with webhook { url, secret, signature_header })" },
+          "400": { description: "Validation error (including invalid_webhook_url for SSRF/credentials/non-HTTPS)" },
           "402": { description: "Payment Required" },
           "429": { description: "Too many pending intents" },
         },
@@ -397,10 +397,11 @@ app.get("/.well-known/x402.json", (c) =>
           condition_type: "price_above|price_below|time_after|pool_liq_above",
           condition_params: "shape depends on condition_type",
           expires_in_seconds: "optional, default 86400, max 2592000",
+          webhook_url: "optional HTTPS URL — push delivery on match (eliminates polling). Server returns webhook_secret ONCE for HMAC signature verification.",
         },
         priceLamports: "10000000",
         priceLabel: "0.01 SOL per intent",
-        description: "Post a CONDITIONAL borrow: bot watches a trigger condition (price/time/liquidity) and builds the unsigned tx when matched. Agent then polls + signs + submits. Single payment covers the entire intent lifecycle. Same anti-exploit gates as direct borrows.",
+        description: "Post a CONDITIONAL borrow: bot watches a trigger condition (price/time/liquidity) and builds the unsigned tx when matched. Agent EITHER polls + signs + submits OR receives an HMAC-signed POST at webhook_url. Single payment covers the entire intent lifecycle. Same anti-exploit gates as direct borrows.",
       },
       {
         method: "GET",

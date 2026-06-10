@@ -246,7 +246,7 @@ const TOOLS = [
   {
     name: "magpie_create_intent",
     description:
-      "Post a CONDITIONAL borrow intent. Bot watches the trigger condition (price_above / price_below / time_after / pool_liq_above) and builds the unsigned tx when matched. Single payment covers entire intent lifecycle. Paid: 0.01 SOL.",
+      "Post a CONDITIONAL borrow intent. Bot watches the trigger condition (price_above / price_below / time_after / pool_liq_above) and builds the unsigned tx when matched. Single payment covers entire intent lifecycle. Paid: 0.01 SOL. Optional webhook_url — server POSTs an HMAC-SHA256-signed payload on match instead of forcing you to poll. The webhook_secret is returned ONCE in the response; persist it to verify signatures on receive.",
     inputSchema: {
       type: "object",
       properties: {
@@ -260,6 +260,11 @@ const TOOLS = [
         },
         condition_params: { type: "object" },
         expires_in_seconds: { type: "integer", minimum: 60, maximum: 2592000 },
+        webhook_url: {
+          type: "string",
+          format: "uri",
+          description: "Optional HTTPS endpoint to receive the match notification. Must be HTTPS; private IPs blocked.",
+        },
       },
       required: [
         "borrower_wallet",
