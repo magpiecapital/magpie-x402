@@ -1,11 +1,11 @@
 /**
- * @magpiecapital/magpie-agent — the agent SDK for Magpie x402.
+ * @magpieloans/magpie-agent — the agent SDK for Magpie x402.
  *
  * Every action on the Magpie permissionless lending protocol as a
  * typed one-liner. Borrow, lend, liquidate, post conditional intents,
  * fetch credit scores. The first x402-native lending SDK on Solana.
  *
- *   import { MagpieAgent } from "@magpiecapital/magpie-agent";
+ *   import { MagpieAgent } from "@magpieloans/magpie-agent";
  *   import { Keypair } from "@solana/web3.js";
  *
  *   const agent = new MagpieAgent({ keypair, rpcUrl });

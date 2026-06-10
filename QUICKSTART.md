@@ -22,7 +22,7 @@ This guide is for code-first builders. If you'd rather your agent host (Claude D
 ```bash
 mkdir my-magpie-agent && cd my-magpie-agent
 npm init -y
-npm install @magpiecapital/magpie-agent @solana/web3.js
+npm install @magpieloans/magpie-agent @solana/web3.js
 ```
 
 ## Step 2 — Generate the agent's keypair (1 minute)
@@ -62,7 +62,7 @@ curl -s https://x402.magpie.capital/api/v1/collateral/eligible | jq '.tokens[] |
 Create `agent.js`:
 
 ```js
-import { MagpieAgent } from "@magpiecapital/magpie-agent";
+import { MagpieAgent } from "@magpieloans/magpie-agent";
 import { Keypair } from "@solana/web3.js";
 import { readFileSync } from "node:fs";
 
@@ -149,7 +149,7 @@ const webhookSecret = intent.webhook.secret;
 Receiver side (verifies the HMAC signature):
 
 ```js
-import { verifyWebhookSignature } from "@magpiecapital/magpie-agent";
+import { verifyWebhookSignature } from "@magpieloans/magpie-agent";
 
 app.post("/intent-matched", (req, res) => {
   if (!verifyWebhookSignature(webhookSecret, req.rawBody, req.headers["x-magpie-signature"])) {

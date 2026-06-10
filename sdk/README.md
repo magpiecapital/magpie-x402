@@ -1,4 +1,4 @@
-# @magpiecapital/magpie-agent
+# @magpieloans/magpie-agent
 
 **The agent SDK for Magpie x402.** Every action on the Magpie permissionless lending protocol as a typed one-liner.
 
@@ -7,13 +7,13 @@ The first x402-native lending SDK on Solana. Agents borrow, lend, liquidate, and
 ## Install
 
 ```bash
-npm install @magpiecapital/magpie-agent @solana/web3.js
+npm install @magpieloans/magpie-agent @solana/web3.js
 ```
 
 ## 30-second example
 
 ```ts
-import { MagpieAgent } from "@magpiecapital/magpie-agent";
+import { MagpieAgent } from "@magpieloans/magpie-agent";
 import { Keypair } from "@solana/web3.js";
 import { readFileSync } from "node:fs";
 
@@ -96,7 +96,7 @@ const { secret } = intent.webhook!;
 When the condition fires, your webhook URL receives an HMAC-signed POST. Verify it:
 
 ```ts
-import { verifyWebhookSignature } from "@magpiecapital/magpie-agent";
+import { verifyWebhookSignature } from "@magpieloans/magpie-agent";
 
 app.post("/intent-matched", (req, res) => {
   const ok = verifyWebhookSignature(

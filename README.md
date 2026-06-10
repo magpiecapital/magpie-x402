@@ -61,7 +61,7 @@ All free endpoints query the on-chain Magpie program directly and have proper `C
 
 > 🚀 **Building your first Magpie agent?** Read [`QUICKSTART.md`](./QUICKSTART.md) — zero to a working autonomous borrow agent on Solana in 10 minutes, using the typed SDK.
 >
-> 📦 **TypeScript SDK** (`@magpiecapital/magpie-agent`): every action as a one-liner. Borrow, lend, liquidate, post conditional intents — no HTTP plumbing. See [`sdk/README.md`](./sdk/README.md).
+> 📦 **TypeScript SDK** (`@magpieloans/magpie-agent`): every action as a one-liner. Borrow, lend, liquidate, post conditional intents — no HTTP plumbing. See [`sdk/README.md`](./sdk/README.md).
 >
 > 🧩 **MCP server** for Claude Desktop / Cursor / Windsurf / ChatGPT desktop: one config block, 19 tools. See [`mcp/README.md`](./mcp/README.md).
 >

@@ -7,7 +7,7 @@
  *
  * Pattern:
  *
- *   import { verifyWebhookSignature } from "@magpiecapital/magpie-agent";
+ *   import { verifyWebhookSignature } from "@magpieloans/magpie-agent";
  *
  *   app.post("/intent", async (req, res) => {
  *     const ok = verifyWebhookSignature(

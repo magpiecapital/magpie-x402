@@ -44,7 +44,7 @@ No clone, no build, no absolute paths in your host config:
 
 ```bash
 # Verify it runs once before wiring into your host:
-npx -y @magpiecapital/magpie-mcp --help
+npx -y @magpieloans/magpie-mcp --help
 ```
 
 Then in your host config:
@@ -54,7 +54,7 @@ Then in your host config:
   "mcpServers": {
     "magpie": {
       "command": "npx",
-      "args": ["-y", "@magpiecapital/magpie-mcp"],
+      "args": ["-y", "@magpieloans/magpie-mcp"],
       "env": {
         "SOLANA_RPC_URL": "https://api.mainnet-beta.solana.com",
         "MAGPIE_MCP_PAYER_KEYPAIR": "/path/to/payer-id.json"
@@ -152,7 +152,7 @@ The package is set up for `npm publish` with no additional configuration. From `
 
 ```bash
 # One-time per machine:
-npm login --scope=@magpiecapital
+npm login --scope=@magpieloans
 
 # Each release:
 # 1. Bump version in package.json (semver)
@@ -160,7 +160,7 @@ npm login --scope=@magpiecapital
 npm publish
 ```
 
-The package is scoped (`@magpiecapital/magpie-mcp`) and `publishConfig.access: "public"` is set, so publish doesn't require any extra flags. The `files` field whitelists what ships — only `dist/`, `README.md`, `LICENSE` end up in the tarball (~9 KB).
+The package is scoped (`@magpieloans/magpie-mcp`) and `publishConfig.access: "public"` is set, so publish doesn't require any extra flags. The `files` field whitelists what ships — only `dist/`, `README.md`, `LICENSE` end up in the tarball (~9 KB).
 
 Verify the contents before publish:
 
