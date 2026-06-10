@@ -86,7 +86,9 @@ export async function buildBorrowHandler(c: Context) {
   } catch {
     return c.json({ error: "invalid_pubkey" }, 400);
   }
-  if (!/^\d+$/.test(amount)) return c.json({ error: "amount_must_be_u64_string" }, 400);
+  // u64 max is 18,446,744,073,709,551,615 — 20 digits. Cap at 20 chars
+  // so we reject a 1000-char "u64" before forwarding to the bot.
+  if (!/^\d{1,20}$/.test(amount)) return c.json({ error: "amount_must_be_u64_string" }, 400);
 
   // Forward to bot.
   let res: Response;
