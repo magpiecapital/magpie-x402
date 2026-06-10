@@ -18,20 +18,36 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    # The CI workflow gates merges; if CI is red we don't deploy.
-    # Skip the gate via workflow_dispatch when you need to override.
+    # Minimum-privilege permissions block. All other defaults (issues,
+    # pull-requests, packages, etc.) collapse to `none` once we declare
+    # any explicit permissions — only what's listed here is granted.
     permissions:
       contents: read
+      id-token: none
+      actions: none
+      checks: none
+      deployments: none
+      packages: none
+      pull-requests: none
+      statuses: none
     env:
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      # Actions pinned to full commit SHAs, not tags. Tags are mutable —
+      # a compromised maintainer could move actions/checkout@v4 to point
+      # at a malicious commit and our deploy starts exfiltrating secrets.
+      # SHAs are immutable. The `# v4.2.2` comment is for human review;
+      # the SHA is what GitHub Actions actually fetches.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af  # v4.1.0
         with:
           node-version: '22'
+      # Vercel CLI pinned to a tested version. Bumping requires editing
+      # this file (visible diff) — supply-chain attack via `@latest`
+      # auto-upgrade is impossible.
       - name: Install Vercel CLI
-        run: npm install --global vercel@latest
+        run: npm install --global vercel@54.11.1
       - name: Pull Vercel environment info
         run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
       - name: Build for production
