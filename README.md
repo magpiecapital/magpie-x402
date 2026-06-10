@@ -59,7 +59,13 @@
 
 All free endpoints query the on-chain Magpie program directly and have proper `Cache-Control` headers so CDN edges serve repeat reads without round-tripping.
 
-> 👉 **New to this API?** Start at [`/examples/`](./examples/) — six turn-key TypeScript agents (credit-score fetch, liquidation bot, full agent borrow loop, conditional intent, loan monitor, yield agent) that talk to the live production endpoint. Each is a single file, depends only on `@solana/web3.js`, runs with `npx tsx`.
+> 🚀 **Building your first Magpie agent?** Read [`QUICKSTART.md`](./QUICKSTART.md) — zero to a working autonomous borrow agent on Solana in 10 minutes, using the typed SDK.
+>
+> 📦 **TypeScript SDK** (`@magpiecapital/magpie-agent`): every action as a one-liner. Borrow, lend, liquidate, post conditional intents — no HTTP plumbing. See [`sdk/README.md`](./sdk/README.md).
+>
+> 🧩 **MCP server** for Claude Desktop / Cursor / Windsurf / ChatGPT desktop: one config block, 19 tools. See [`mcp/README.md`](./mcp/README.md).
+>
+> 👉 **Just want code examples?** [`/examples/`](./examples/) — 10 turn-key TypeScript agents (credit fetch, liquidation keeper, full borrow loop, conditional intent, yield agent, webhook receiver, collateral screener, equity-leverage preview, more) that talk to the live production endpoint. Each is a single file, runs with `npx tsx`.
 >
 > 🧩 **Using Claude Desktop, Cursor, Windsurf, or ChatGPT desktop?** [`/mcp/`](./mcp/) ships a one-config-block MCP server that exposes the full API as native tools in your agent host. Free reads work without any keypair; paid endpoints sign x402 payments locally with a configured Solana wallet.
 
