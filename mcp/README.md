@@ -35,6 +35,38 @@ When a paid tool fires, the server signs an x402 payment tx locally with your co
 
 ## Install
 
+Two paths. Both end at the same place.
+
+### Path A — npm (recommended once published)
+
+No clone, no build, no absolute paths in your host config:
+
+```bash
+# Verify it runs once before wiring into your host:
+npx -y @magpiecapital/magpie-mcp --help
+```
+
+Then in your host config:
+
+```json
+{
+  "mcpServers": {
+    "magpie": {
+      "command": "npx",
+      "args": ["-y", "@magpiecapital/magpie-mcp"],
+      "env": {
+        "SOLANA_RPC_URL": "https://api.mainnet-beta.solana.com",
+        "MAGPIE_MCP_PAYER_KEYPAIR": "/path/to/payer-id.json"
+      }
+    }
+  }
+}
+```
+
+### Path B — from source
+
+If the npm package isn't published yet, or you want to hack on the server:
+
 ```bash
 git clone git@github.com:magpiecapital/magpie-x402.git
 cd magpie-x402/mcp
@@ -42,11 +74,11 @@ npm install
 npm run build
 ```
 
-The built executable lands at `mcp/dist/index.js`. Note the absolute path — you'll use it in your host config below.
+Built executable lands at `mcp/dist/index.js`. Use the absolute path in your host config below.
 
 ## Configure your host
 
-Replace `/ABS/PATH/TO/magpie-x402/mcp/dist/index.js` in each snippet with the full path you just built.
+Pick the snippet for your host. The `command` + `args` shape changes between npm-install vs source-build; the `env` block is identical.
 
 ### Claude Desktop
 
@@ -71,41 +103,11 @@ Restart Claude Desktop. The Magpie tools appear in the tool picker.
 
 ### Cursor
 
-Edit `~/.cursor/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "magpie": {
-      "command": "node",
-      "args": ["/ABS/PATH/TO/magpie-x402/mcp/dist/index.js"],
-      "env": {
-        "SOLANA_RPC_URL": "https://api.mainnet-beta.solana.com",
-        "MAGPIE_MCP_PAYER_KEYPAIR": "/ABS/PATH/TO/payer-id.json"
-      }
-    }
-  }
-}
-```
+Edit `~/.cursor/mcp.json`. Same shape as Claude Desktop above.
 
 ### Windsurf
 
-Edit `~/.codeium/windsurf/mcp_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "magpie": {
-      "command": "node",
-      "args": ["/ABS/PATH/TO/magpie-x402/mcp/dist/index.js"],
-      "env": {
-        "SOLANA_RPC_URL": "https://api.mainnet-beta.solana.com",
-        "MAGPIE_MCP_PAYER_KEYPAIR": "/ABS/PATH/TO/payer-id.json"
-      }
-    }
-  }
-}
-```
+Edit `~/.codeium/windsurf/mcp_config.json`. Same shape.
 
 ### ChatGPT desktop / any other MCP-aware host
 
@@ -142,6 +144,28 @@ The keypair you configure is the only place SOL can leave. Per-call costs are ex
 **`fetch failed` on x402.magpie.capital** — check the URL is reachable from your machine. If you're behind a corporate proxy, set `HTTPS_PROXY` in the same `env` block.
 
 **RPC rate-limit during a paid call** — switch `SOLANA_RPC_URL` to a paid Helius/Triton/QuickNode URL. The default `api.mainnet-beta.solana.com` will throttle under any sustained use.
+
+## For maintainers — publishing to npm
+
+The package is set up for `npm publish` with no additional configuration. From `mcp/`:
+
+```bash
+# One-time per machine:
+npm login --scope=@magpiecapital
+
+# Each release:
+# 1. Bump version in package.json (semver)
+# 2. Publish — prepublishOnly rebuilds dist/ and chmod +x's the binary
+npm publish
+```
+
+The package is scoped (`@magpiecapital/magpie-mcp`) and `publishConfig.access: "public"` is set, so publish doesn't require any extra flags. The `files` field whitelists what ships — only `dist/`, `README.md`, `LICENSE` end up in the tarball (~9 KB).
+
+Verify the contents before publish:
+
+```bash
+npm pack --dry-run
+```
 
 ## License
 

@@ -1,28 +1,54 @@
 {
   "name": "@magpiecapital/magpie-mcp",
   "version": "0.1.0",
-  "description": "MCP server exposing Magpie Capital's x402 API as native tools for Claude Desktop, Cursor, Windsurf, and any MCP-aware agent host.",
+  "description": "MCP server exposing Magpie Capital's x402 API as native tools for Claude Desktop, Cursor, Windsurf, ChatGPT desktop, and any MCP-aware agent host.",
   "type": "module",
   "bin": {
     "magpie-mcp": "./dist/index.js"
   },
   "main": "./dist/index.js",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "prepublishOnly": "rm -rf dist && tsc && chmod +x dist/index.js"
   },
   "engines": {
     "node": ">=20"
   },
-  "keywords": ["mcp", "magpie", "solana", "defi", "ai-agents", "x402"],
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "magpie",
+    "solana",
+    "defi",
+    "lending",
+    "ai-agents",
+    "x402",
+    "claude-desktop",
+    "cursor",
+    "windsurf"
+  ],
   "author": "Magpie Capital",
   "license": "MIT",
+  "homepage": "https://magpie.capital/x402",
+  "bugs": {
+    "url": "https://github.com/magpiecapital/magpie-x402/issues"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/magpiecapital/magpie-x402.git",
     "directory": "mcp"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
