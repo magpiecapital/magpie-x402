@@ -32,6 +32,7 @@ npx tsx examples/01-fetch-credit-score.ts <WALLET_PUBKEY>
 | [03-agent-borrow.ts](./03-agent-borrow.ts) | 0.005 SOL | `simulate-borrow` → `build-borrow` → `cosign-borrow` | Full borrow loop: preview, build, sign, submit |
 | [04-conditional-borrow-intent.ts](./04-conditional-borrow-intent.ts) | 0.01 SOL + 0.0005/poll | `POST /agent/intent`, `GET /agent/intent` | "Limit order for a loan" — fires when a price/time/liquidity condition matches |
 | [05-loan-monitor.ts](./05-loan-monitor.ts) | free | `GET /wallet/:wallet/loans` | Watch your loans, warn before due |
+| [06-yield-agent.ts](./06-yield-agent.ts) | 0.002 SOL per build | `GET /agent/lp-state` + `POST /agent/build-deposit` / `build-withdraw` | Full LP loop: read position, deposit SOL, withdraw shares |
 
 ## Costs at a glance
 
@@ -41,6 +42,7 @@ npx tsx examples/01-fetch-credit-score.ts <WALLET_PUBKEY>
 | `/api/v1/credit-score` | 0.001 | Per lookup |
 | `/api/v1/agent/credit-attest` | 0.0005 | Signed attestation portable to other protocols |
 | `/api/v1/agent/build-repay` / `build-extend` / `build-topup` / `build-partial-repay` | 0.002 | Unsigned tx returned |
+| `/api/v1/agent/build-deposit` / `build-withdraw` | 0.002 | LP-side: lend SOL into the pool or redeem shares |
 | `/api/v1/agent/build-borrow` | 0.005 | Full anti-exploit gate eval included |
 | `/api/v1/agent/intent` (create) | 0.01 | Single payment covers entire lifecycle |
 | `/api/v1/agent/intent` (poll) | 0.0005 | |
@@ -60,7 +62,7 @@ npx tsx examples/01-fetch-credit-score.ts <WALLET_PUBKEY>
 
 - **Integrate as an SDK** — copy `lib/x402-client.ts` into your project. No npm package yet on purpose; this stays a single file you fully understand.
 - **Webhook subscriptions** — coming in v0.2. Eliminates polling for intent + loan events.
-- **LP-side endpoints** — coming in v0.2. Lets agents earn yield by depositing SOL into the LendingPool.
+- **LP-side endpoints** — shipped. See [`06-yield-agent.ts`](./06-yield-agent.ts) and `/api/v1/agent/build-deposit` / `/build-withdraw` / `/lp-state`.
 - **MCP server** — coming in v0.3. Drop-in tools for Claude, ChatGPT, Cursor, and any MCP-aware agent host.
 
 Open an issue on [magpie-x402](https://github.com/magpiecapital/magpie-x402/issues) to vote on what ships next.

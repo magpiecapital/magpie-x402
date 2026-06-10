@@ -34,6 +34,11 @@ import {
   protocolPulseHandler,
   leaderboardHandler,
 } from "./routes/agent-activity.js";
+import {
+  buildDepositHandler,
+  buildWithdrawHandler,
+  lpStateHandler,
+} from "./routes/agent-lp.js";
 import { TIERS } from "./lib/tiers.js";
 
 const PAY_TO = process.env.MAGPIE_PAY_TO;
@@ -81,6 +86,7 @@ app.get("/", (c) =>
         "GET /api/v1/agent/activity — anonymized recent borrow/repay/liquidate events (15s cache)",
         "GET /api/v1/agent/protocol-pulse — 24h aggregate volume + counts (30s cache)",
         "GET /api/v1/agent/leaderboard — top wallets by Magpie credit score (60s cache)",
+        "GET /api/v1/agent/lp-state?wallet=<pubkey> — depositor position + pool context (10s cache)",
       ],
       paid: [
         "GET /api/v1/credit-score?wallet=<pubkey> — 0.001 SOL",
@@ -90,6 +96,8 @@ app.get("/", (c) =>
         "POST /api/v1/agent/build-extend — 0.002 SOL",
         "POST /api/v1/agent/build-topup — 0.002 SOL",
         "POST /api/v1/agent/build-partial-repay — 0.002 SOL",
+        "POST /api/v1/agent/build-deposit — 0.002 SOL (LP — deposit SOL into the LendingPool)",
+        "POST /api/v1/agent/build-withdraw — 0.002 SOL (LP — withdraw shares)",
         "POST /api/v1/agent/intent — 0.01 SOL (conditional borrow, single payment for lifecycle)",
         "GET /api/v1/agent/intent?id=<intent_id> — 0.0005 SOL",
         "GET /api/v1/agent/intents?wallet=<pubkey> — 0.001 SOL",
@@ -131,6 +139,10 @@ app.get("/api/v1/markets/liquidatable", liquidatableHandler);
 app.get("/api/v1/agent/activity", agentActivityHandler);
 app.get("/api/v1/agent/protocol-pulse", protocolPulseHandler);
 app.get("/api/v1/agent/leaderboard", leaderboardHandler);
+
+// Agent LP-state — read-only. Free because reading depositor positions
+// is just an account decode (same cost class as /api/v1/pool).
+app.get("/api/v1/agent/lp-state", lpStateHandler);
 
 // Public tier constants — agents fetch this once and cache forever
 // (tiers are fixed at the program level; they only change on a v3
@@ -291,6 +303,36 @@ app.get("/openapi.json", (c) => c.json({
         responses: { "200": { description: "Credit leaderboard" } },
       },
     },
+    "/api/v1/agent/lp-state": {
+      get: {
+        summary: "Read a wallet's LP position + pool context",
+        description: "Free. Shares, deposited lamports, current value, yield earned, share-of-pool. Plus pool totals for the caller to compute their own ratios. 10s cache.",
+        parameters: [{ name: "wallet", in: "query", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Position + pool context" } },
+      },
+    },
+    "/api/v1/agent/build-deposit": {
+      post: {
+        summary: "Build an unsigned LP-deposit tx (paid 0.002 SOL)",
+        description: "Wraps SOL → wSOL → deposits into the main LendingPool → closes wSOL (recovers dust). Caller signs locally and submits. Server never touches the keypair.",
+        responses: {
+          "200": { description: "partial_signed_tx_b64 + summary" },
+          "400": { description: "Validation error" },
+          "402": { description: "Payment Required" },
+        },
+      },
+    },
+    "/api/v1/agent/build-withdraw": {
+      post: {
+        summary: "Build an unsigned LP-withdraw tx (paid 0.002 SOL)",
+        description: "Withdraws the requested shares back to SOL. Server pre-validates against the on-chain position and refuses chunks larger than max_safe_shares (avoids the v1 u64 overflow).",
+        responses: {
+          "200": { description: "partial_signed_tx_b64 + summary" },
+          "400": { description: "Validation error or insufficient position" },
+          "402": { description: "Payment Required" },
+        },
+      },
+    },
   },
 }));
 
@@ -398,6 +440,36 @@ app.get("/.well-known/x402.json", (c) =>
         priceLabel: "free (60s cache)",
         description: "Top wallets by Magpie credit score, anonymized.",
       },
+      {
+        method: "GET",
+        path: "/api/v1/agent/lp-state",
+        params: { wallet: "Solana pubkey (base58)" },
+        priceLamports: "0",
+        priceLabel: "free (10s cache)",
+        description: "Depositor position state + pool context — shares, deposited lamports, current value, yield earned, share-of-pool.",
+      },
+      {
+        method: "POST",
+        path: "/api/v1/agent/build-deposit",
+        params: {
+          depositor: "Solana pubkey (base58)",
+          lamports: "u64 string in lamports (min 10000000 = 0.01 SOL)",
+        },
+        priceLamports: "2000000",
+        priceLabel: "0.002 SOL per build",
+        description: "Build an unsigned LP-deposit tx — wraps SOL → wSOL → deposits into the main LendingPool → closes wSOL ATA. Caller signs and submits.",
+      },
+      {
+        method: "POST",
+        path: "/api/v1/agent/build-withdraw",
+        params: {
+          depositor: "Solana pubkey",
+          shares: "u64 string — LP shares to redeem",
+        },
+        priceLamports: "2000000",
+        priceLabel: "0.002 SOL per build",
+        description: "Build an unsigned LP-withdraw tx for the given shares. Server refuses chunks larger than max_safe_shares (avoids the v1 program's u64 overflow on huge positions). For positions above one safe chunk, withdraw in multiple calls.",
+      },
     ],
     contact: "https://github.com/magpiecapital/magpie-x402/issues",
     examples: "https://github.com/magpiecapital/magpie-x402/tree/main/examples",
@@ -503,6 +575,32 @@ if (PAY_TO) {
       docsUrl: "https://github.com/magpiecapital/magpie-x402#agent-build-partial-repay",
     }),
     buildPartialRepayHandler,
+  );
+
+  // ── LP-side (agent-as-lender) ──
+  // Completes the protocol-integration loop. With these two endpoints
+  // agents can also EARN yield, not just borrow — deposit SOL into the
+  // main LendingPool and withdraw shares against the live shares:
+  // deposits ratio. Same price as the loan-management builders.
+  app.post(
+    "/api/v1/agent/build-deposit",
+    x402Required({
+      payTo: PAY_TO,
+      amountLamports: 2_000_000n,
+      label: "Magpie agent LP-deposit-tx builder",
+      docsUrl: "https://github.com/magpiecapital/magpie-x402#agent-build-deposit",
+    }),
+    buildDepositHandler,
+  );
+  app.post(
+    "/api/v1/agent/build-withdraw",
+    x402Required({
+      payTo: PAY_TO,
+      amountLamports: 2_000_000n,
+      label: "Magpie agent LP-withdraw-tx builder",
+      docsUrl: "https://github.com/magpiecapital/magpie-x402#agent-build-withdraw",
+    }),
+    buildWithdrawHandler,
   );
 
   // ── Conditional borrow intents — "limit orders for borrows" ──

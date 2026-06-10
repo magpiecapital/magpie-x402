@@ -52,7 +52,10 @@
 | GET | `/api/v1/agent/activity` | Free | Anonymized recent borrow/repay/liquidate events. First-touch "is this protocol alive?" feed for arriving agents. 15s cache. |
 | GET | `/api/v1/agent/protocol-pulse` | Free | 24h aggregates: active loans, active borrowers, borrow volume, liquidations. 30s cache. |
 | GET | `/api/v1/agent/leaderboard` | Free | Top wallets by Magpie credit score, anonymized. 60s cache. |
+| GET | `/api/v1/agent/lp-state?wallet=<pubkey>` | Free | Depositor position + pool context (shares, deposited, current value, yield, share-of-pool). 10s cache. |
 | GET | `/api/v1/credit-score?wallet=<pubkey>` | 0.001 SOL | Magpie credit score (300–850) + tier benefits |
+| POST | `/api/v1/agent/build-deposit` | 0.002 SOL | Build an unsigned LP-deposit tx (SOL → pool). Caller signs and submits. |
+| POST | `/api/v1/agent/build-withdraw` | 0.002 SOL | Build an unsigned LP-withdraw tx (shares → SOL). Server validates against the on-chain position and refuses unsafe chunk sizes. |
 
 All free endpoints query the on-chain Magpie program directly and have proper `Cache-Control` headers so CDN edges serve repeat reads without round-tripping.
 
