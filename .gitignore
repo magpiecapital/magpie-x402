@@ -55,3 +55,4 @@ coverage/
 .cache/
 tmp/
 temp/
+.vercel

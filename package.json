@@ -39,5 +39,10 @@
     "@types/node": "^20.0.0",
     "tsx": "^4.0.0",
     "typescript": "^5.5.0"
+  },
+  "overrides": {
+    "rpc-websockets": {
+      "uuid": "^8.3.2"
+    }
   }
 }
