@@ -33,8 +33,9 @@ export function verifyWebhookSignature(
   presentedSignatureHex: string | string[] | undefined,
 ): boolean {
   if (typeof presentedSignatureHex !== "string") return false;
-  if (presentedSignatureHex.length !== 64) return false;
-  if (!/^[0-9a-f]+$/.test(presentedSignatureHex)) return false;
+  // Strict: exact length + lowercase hex only. Both checks in one
+  // regex so a length-only-then-format split can't get out of sync.
+  if (!/^[0-9a-f]{64}$/.test(presentedSignatureHex)) return false;
 
   const body = typeof bodyBytes === "string"
     ? Buffer.from(bodyBytes, "utf8")

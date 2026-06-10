@@ -322,7 +322,16 @@ export class MagpieAgent {
     tx.partialSign(keypair);
     const signedB64 = tx.serialize({ requireAllSignatures: false }).toString("base64");
 
-    const cosignUrl = built.data.next_step?.url ?? `${this.siteUrl}/api/v1/cosign-borrow`;
+    // Validate the cosign URL origin BEFORE posting the signed tx
+    // bytes. The x402 service returns next_step.url; if x402 were
+    // compromised, an attacker could redirect this POST to a host
+    // they control and harvest the signature. We accept only URLs
+    // whose origin matches the configured siteUrl (default
+    // magpie.capital) — never a third-party URL.
+    const proposedCosignUrl =
+      built.data.next_step?.url ?? `${this.siteUrl}/api/v1/cosign-borrow`;
+    const cosignUrl = this.validateCosignUrl(proposedCosignUrl);
+
     const cosignRes = await fetch(cosignUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -540,5 +549,37 @@ export class MagpieAgent {
       );
     }
     return this.keypair.publicKey.toBase58();
+  }
+
+  /**
+   * Validate that a cosign-borrow URL handed to us by the x402 service
+   * actually lives on our trusted host. Defends against a malicious
+   * x402 response redirecting the signed tx to an attacker.
+   *
+   * The signed tx contains the borrower's signature; if it landed on a
+   * hostile host, the attacker could relay it through any cosigner of
+   * their choice and capture the resulting on-chain SOL transfer.
+   */
+  private validateCosignUrl(url: string): string {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      throw new X402Error(
+        `Invalid cosign URL returned by x402: ${url.slice(0, 100)}`,
+        500,
+        null,
+      );
+    }
+    const siteOrigin = new URL(this.siteUrl).origin;
+    if (parsed.origin !== siteOrigin) {
+      throw new X402Error(
+        `Refusing to post signed tx to non-Magpie origin (got ${parsed.origin}, expected ${siteOrigin}). ` +
+          `This may indicate a compromised x402 service.`,
+        500,
+        null,
+      );
+    }
+    return parsed.toString();
   }
 }

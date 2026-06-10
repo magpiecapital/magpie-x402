@@ -1,6 +1,6 @@
 {
   "name": "@magpieloans/magpie-agent",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "TypeScript SDK for Magpie x402 — the first x402-native permissionless lending protocol on Solana. Agents borrow, lend, liquidate, and post conditional intents in one line of code.",
   "type": "module",
   "main": "./dist/index.js",
