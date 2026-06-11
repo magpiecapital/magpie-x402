@@ -97,7 +97,16 @@ async function forward(c: Context, url: string, init: RequestInit) {
  *   slippage_bps:         <integer>           // 10..1000
  *   sell_destination?:    'sol'|'usdc'        // default 'sol'
  *   expires_at?:          <ISO string>        // optional auto-cancel
+ *   auto_escalate_slippage?: boolean          // default false
  * }
+ *
+ * auto_escalate_slippage: when true, the engine bumps slippage_bps
+ * along a 1.5x curve on each proceeds-insufficient revert, never
+ * exceeding the borrower's delegation cap (max_slippage_bps in
+ * agent_delegations, snapshotted at arm time). This is the agent's
+ * opt-in for "actually make this execute" semantics. When false (the
+ * default), slippage_bps is exact — the engine reverts forever at
+ * the armed value until liquidity matches or MAX_FAILURE_COUNT trips.
  */
 export async function armLimitCloseHandler(c: Context) {
   if (!INTERNAL_TOKEN) return unconfigured(c);
@@ -125,6 +134,11 @@ export async function armLimitCloseHandler(c: Context) {
   const slippageBpsRaw     = Number(b.slippage_bps);
   const sellDestination    = String(b.sell_destination ?? "sol").toLowerCase();
   const expiresAt          = b.expires_at == null ? null : String(b.expires_at);
+  // Strict boolean coercion — only the literal true value enables
+  // auto-escalation. Strings like "true" or "1" are deliberately
+  // ignored to avoid accidental opt-in from clients that JSON-encode
+  // booleans loosely.
+  const autoEscalate       = b.auto_escalate_slippage === true;
 
   if (!userWallet || !loanId || !triggerKind || !triggerValueMicro) {
     return c.json(
@@ -196,6 +210,7 @@ export async function armLimitCloseHandler(c: Context) {
       slippage_bps: slippageBpsRaw,
       sell_destination: sellDestination,
       expires_at: expiresAt,
+      auto_escalate_slippage: autoEscalate,
       x402_tx_signature: x402Sig ?? "",
     }),
   });
