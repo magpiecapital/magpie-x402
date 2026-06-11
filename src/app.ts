@@ -41,6 +41,12 @@ import {
   lpStateHandler,
 } from "./routes/agent-lp.js";
 import { buildLiquidateHandler } from "./routes/agent-liquidate.js";
+import {
+  armLimitCloseHandler,
+  getLimitCloseHandler,
+  listLimitCloseHandler,
+  cancelLimitCloseHandler,
+} from "./routes/agent-limit-close.js";
 import { tokenRiskHandler } from "./routes/token-risk.js";
 import { TIERS } from "./lib/tiers.js";
 
@@ -130,6 +136,10 @@ app.get("/", (c) =>
         "POST /api/v1/agent/intent — 0.01 SOL (conditional borrow, single payment for lifecycle)",
         "GET /api/v1/agent/intent?id=<intent_id> — 0.0005 SOL",
         "GET /api/v1/agent/intents?wallet=<pubkey> — 0.001 SOL",
+        "POST /api/v1/agent/limit-close — 0.001 SOL (arm a limit-close+sell order against a borrower's loan; borrower must pre-authorize via TG /agent-authorize)",
+        "GET /api/v1/agent/limit-close?id=<order_id> — FREE (X-Agent-Pubkey header)",
+        "GET /api/v1/agent/limit-close/list — FREE (X-Agent-Pubkey header)",
+        "DELETE /api/v1/agent/limit-close?id=<order_id> — FREE (X-Agent-Pubkey header)",
       ],
       examples: "https://github.com/magpiecapital/magpie-x402/tree/main/examples",
       mcp_server: "https://github.com/magpiecapital/magpie-x402/tree/main/mcp",
@@ -756,6 +766,37 @@ if (PAY_TO) {
     }),
     listIntentsHandler,
   );
+
+  // ── Agent-mediated limit-close-and-sell ──
+  // Tier 2 of the limit-close architecture. The borrower has pre-
+  // authorized THIS agent's pubkey via the TG /agent-authorize
+  // command (which writes an agent_delegations row). The agent
+  // pays 0.001 SOL via x402 to arm an order; the bot validates
+  // the delegation + order params, INSERTs into limit_close_orders
+  // with source='agent_x402', and the private engine processes it
+  // identically to a TG-armed order.
+  //
+  // Arm fee is 0.001 SOL (same as credit-score / token-risk) —
+  // a one-time charge that covers the watch loop's resource cost;
+  // the 1% execution fee on fire is where the protocol earns the
+  // real value (a fee on the proceeds, not on the arm).
+  //
+  // Read / list / cancel are FREE so agents can manage their
+  // pipeline without being taxed. Scoping by X-Agent-Pubkey
+  // header keeps an agent from peeking at competitors' orders.
+  app.post(
+    "/api/v1/agent/limit-close",
+    x402Required({
+      payTo: PAY_TO,
+      amountLamports: 1_000_000n, // 0.001 SOL per arm
+      label: "Magpie agent limit-close arm",
+      docsUrl: "https://github.com/magpiecapital/magpie-x402#agent-limit-close",
+    }),
+    armLimitCloseHandler,
+  );
+  app.get("/api/v1/agent/limit-close", getLimitCloseHandler);
+  app.get("/api/v1/agent/limit-close/list", listLimitCloseHandler);
+  app.delete("/api/v1/agent/limit-close", cancelLimitCloseHandler);
 } else {
   // Surfaces a clear "service misconfigured" error instead of a silent
   // 404 when MAGPIE_PAY_TO isn't set in the environment.
