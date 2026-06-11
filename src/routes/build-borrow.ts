@@ -1,5 +1,6 @@
 import type { Context } from "hono";
 import { PublicKey } from "@solana/web3.js";
+import { enforcePayerMatchesWallet } from "../lib/payer-bind.js";
 
 /**
  * POST /api/v1/agent/build-borrow
@@ -89,6 +90,13 @@ export async function buildBorrowHandler(c: Context) {
   // u64 max is 18,446,744,073,709,551,615 — 20 digits. Cap at 20 chars
   // so we reject a 1000-char "u64" before forwarding to the bot.
   if (!/^\d{1,20}$/.test(amount)) return c.json({ error: "amount_must_be_u64_string" }, 400);
+
+  // Security gate: x402 payer must equal borrower_wallet. Without this
+  // a paying caller can have the server construct a borrow tx targeting
+  // any wallet's positions, leaking eligibility info and burning the
+  // bot's gauntlet RPC budget.
+  const mismatch = enforcePayerMatchesWallet(c, borrower);
+  if (mismatch) return mismatch;
 
   // Forward to bot.
   let res: Response;

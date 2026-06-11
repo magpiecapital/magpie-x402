@@ -73,21 +73,31 @@ setInterval(() => {
   }
 }, 5 * 60_000).unref?.();
 
+// Trust hierarchy for client-IP derivation:
+//   1. Vercel-specific `x-vercel-forwarded-for` — set by Vercel's edge,
+//      client-unforgeable. Trusted whenever present.
+//   2. Cloudflare's `cf-connecting-ip` — same property if we ever deploy
+//      behind Cloudflare. Trusted whenever present.
+//   3. Generic `x-forwarded-for` / `x-real-ip` — CAN be spoofed by any
+//      client. Trusted ONLY when TRUST_PROXY=1 is explicitly set in env
+//      (i.e., the operator has confirmed a trusted proxy strips the
+//      client-supplied header before passing it through).
+//   4. Fall back to "anon" so the attacker can DoS themselves but not
+//      the rest of the world.
+const TRUST_GENERIC_PROXY = process.env.TRUST_PROXY === "1";
+
 export const rateLimit: MiddlewareHandler = async (c, next) => {
-  // Best-effort IP derivation. Trust X-Forwarded-For only because
-  // we expect to deploy behind Vercel/Railway/Cloudflare. If you
-  // deploy bare-metal, strip the header trust at the edge.
-  //
-  // We also validate the first value matches an IP pattern — without
-  // this an attacker sending many unique X-Forwarded-For garbage
-  // values could pollute the bucket map between cleanup cycles. Any
-  // unparseable value falls back to the "anon" key so the attacker
-  // can DoS themselves but not the rest of the world.
-  const xff = c.req.header("x-forwarded-for")?.split(",")[0]?.trim();
-  const xrip = c.req.header("x-real-ip")?.trim();
   let ip = "anon";
-  if (xff && looksLikeIp(xff)) ip = xff;
-  else if (xrip && looksLikeIp(xrip)) ip = xrip;
+  const vercelXff = c.req.header("x-vercel-forwarded-for")?.split(",")[0]?.trim();
+  const cfIp = c.req.header("cf-connecting-ip")?.trim();
+  if (vercelXff && looksLikeIp(vercelXff)) ip = vercelXff;
+  else if (cfIp && looksLikeIp(cfIp)) ip = cfIp;
+  else if (TRUST_GENERIC_PROXY) {
+    const xff = c.req.header("x-forwarded-for")?.split(",")[0]?.trim();
+    const xrip = c.req.header("x-real-ip")?.trim();
+    if (xff && looksLikeIp(xff)) ip = xff;
+    else if (xrip && looksLikeIp(xrip)) ip = xrip;
+  }
 
   const m = check(minuteBuckets, ip, PER_MIN, 60_000);
   if (!m.allowed) {

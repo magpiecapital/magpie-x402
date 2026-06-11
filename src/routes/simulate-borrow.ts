@@ -88,6 +88,9 @@ export async function simulateBorrowHandler(c: Context) {
     });
     return c.json(quote, 200, { "Cache-Control": "private, max-age=5" });
   } catch (err) {
-    return c.json({ error: "quote_failed", reason: (err as Error).message }, 400);
+    // Slice the error message — full message can leak internal schema /
+    // RPC info; 200 chars is enough for the caller to know what went
+    // wrong while keeping the recon channel minimal.
+    return c.json({ error: "quote_failed", reason: (err as Error).message?.slice(0, 200) }, 400);
   }
 }

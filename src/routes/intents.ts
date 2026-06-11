@@ -31,6 +31,52 @@ function unconfigured(c: Context) {
   );
 }
 
+/** Pull the payer pubkey out of the x402 context. */
+function getPayer(c: Context): string | null {
+  const ctx = c.get("x402") as { payer?: string } | undefined;
+  return ctx?.payer ?? null;
+}
+
+/**
+ * Reject the request if the verified payer pubkey doesn't match the
+ * claimed wallet. Implements the standing rule: per-user wallet info
+ * must never be exposed to a caller who doesn't own that wallet OR
+ * doesn't have the wallet's signed authorization. In x402, the payment
+ * IS the signed authorization, so payer == wallet is the enforcement.
+ */
+function enforcePayerMatchesWallet(c: Context, wallet: string) {
+  const payer = getPayer(c);
+  if (!payer) {
+    return c.json(
+      { error: "missing_payer", detail: "x402 payment context missing payer pubkey" },
+      500,
+    );
+  }
+  if (payer !== wallet) {
+    return c.json(
+      {
+        error: "payer_wallet_mismatch",
+        detail: "The x402 payment signer must equal the queried/borrower wallet. Per-wallet data is gated on payer identity.",
+      },
+      403,
+    );
+  }
+  return null;
+}
+
+/**
+ * Defensive shallow filter to drop prototype-pollution keys before
+ * forwarding an arbitrary object into the bot.
+ */
+const FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+function hasForbiddenKey(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  for (const k of Object.keys(value as Record<string, unknown>)) {
+    if (FORBIDDEN_KEYS.has(k)) return true;
+  }
+  return false;
+}
+
 async function forward(c: Context, url: string, init: RequestInit) {
   let res: Response;
   try {
@@ -103,6 +149,22 @@ export async function createIntentHandler(c: Context) {
   catch { return c.json({ error: "invalid_pubkey" }, 400); }
   // u64 max is 20 digits — cap so we reject e.g. a 1000-char "amount".
   if (!/^\d{1,20}$/.test(amount)) return c.json({ error: "amount_must_be_u64_string" }, 400);
+
+  // HIGH security gate: x402 payer must equal borrower_wallet. Without
+  // this anyone who pays 0.01 SOL can create intents on behalf of any
+  // wallet — server-side resources are spent and the response reveals
+  // per-wallet eligibility.
+  const mismatch = enforcePayerMatchesWallet(c, borrower);
+  if (mismatch) return mismatch;
+
+  // Reject prototype-pollution keys in condition_params before forwarding.
+  if (hasForbiddenKey(condParams)) {
+    return c.json(
+      { error: "invalid_condition_params", detail: "object keys must not include __proto__, constructor, or prototype" },
+      400,
+    );
+  }
+
   // expires_in_seconds: optional, but if provided must be a positive
   // finite integer ≤ 30 days. Bot enforces this too but the edge check
   // means a hostile client can't spam the bot with absurd values that
@@ -146,8 +208,21 @@ export async function getIntentHandler(c: Context) {
   if (!id) return c.json({ error: "missing_id" }, 400);
   if (!/^[A-Za-z0-9_-]{16,32}$/.test(id)) return c.json({ error: "invalid_intent_id" }, 400);
 
+  // We can't validate payer == intent-owner locally because the intent
+  // wallet isn't in the request — we'd have to ask the bot first. Forward
+  // the verified payer pubkey to the bot via X-Magpie-Payer; the bot is
+  // expected to reject if intent.borrower_wallet != payer (see bot-side
+  // agent-intents.js for enforcement).
+  const payer = getPayer(c);
+  if (!payer) {
+    return c.json(
+      { error: "missing_payer", detail: "x402 payment context missing payer pubkey" },
+      500,
+    );
+  }
   return forward(c, `${BOT_API}/api/v1/agent/intent?id=${encodeURIComponent(id)}`, {
     method: "GET",
+    headers: { "X-Magpie-Payer": payer },
   });
 }
 
@@ -175,6 +250,11 @@ export async function listIntentsHandler(c: Context) {
   if (!wallet) return c.json({ error: "missing_wallet" }, 400);
   try { new PublicKey(wallet); }
   catch { return c.json({ error: "invalid_pubkey" }, 400); }
+
+  // HIGH security gate: payer must equal queried wallet. Without this
+  // anyone who pays 0.001 SOL can enumerate any wallet's pending intents.
+  const mismatch = enforcePayerMatchesWallet(c, wallet);
+  if (mismatch) return mismatch;
 
   return forward(c, `${BOT_API}/api/v1/agent/intents?wallet=${encodeURIComponent(wallet)}`, {
     method: "GET",

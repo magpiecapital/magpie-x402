@@ -33,7 +33,7 @@ export async function creditAttestHandler(c: Context) {
   }
   let res: Response;
   try {
-    res = await fetch(`${BOT_API}/api/v1/agent/credit-attest?wallet=${wallet}`, {
+    res = await fetch(`${BOT_API}/api/v1/agent/credit-attest?wallet=${encodeURIComponent(wallet)}`, {
       signal: AbortSignal.timeout(8_000),
     });
   } catch (err) {

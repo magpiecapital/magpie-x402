@@ -1,5 +1,6 @@
 import type { Context } from "hono";
 import { PublicKey } from "@solana/web3.js";
+import { enforcePayerMatchesWallet } from "../lib/payer-bind.js";
 
 /**
  * POST /api/v1/agent/build-repay
@@ -44,6 +45,11 @@ export async function buildRepayHandler(c: Context) {
   } catch {
     return c.json({ error: "invalid_pubkey" }, 400);
   }
+
+  // Security gate: x402 payer must equal borrower_wallet. Same rationale
+  // as build-borrow — gate per-wallet operations to wallet ownership.
+  const mismatch = enforcePayerMatchesWallet(c, borrower);
+  if (mismatch) return mismatch;
 
   let res: Response;
   try {

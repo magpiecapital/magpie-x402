@@ -50,8 +50,14 @@ const app = new Hono();
 
 // Order matters: security headers + CORS + rate limit BEFORE any route
 app.use("*", secureHeaders());
+// CORS default is the public Magpie origins. The earlier `* `default
+// let any browser fetch every paid response (within rate limits) by
+// triggering 402s + payments from third-party pages. Operators who need
+// a wider allowlist can override with CORS_ORIGINS=https://... (comma-
+// separated). Explicit "*" still works but must be opted in.
+const CORS_DEFAULT = "https://magpie.capital,https://www.magpie.capital";
 app.use("*", cors({
-  origin: (process.env.CORS_ORIGINS || "*").split(",").map((s) => s.trim()),
+  origin: (process.env.CORS_ORIGINS || CORS_DEFAULT).split(",").map((s) => s.trim()),
   allowMethods: ["GET", "HEAD", "POST", "DELETE", "OPTIONS"],
   allowHeaders: ["Content-Type", "X-Payment", "X-Payment-Required-Scheme"],
   exposeHeaders: [

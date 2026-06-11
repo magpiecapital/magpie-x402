@@ -1,5 +1,6 @@
 import type { Context } from "hono";
 import { PublicKey } from "@solana/web3.js";
+import { enforcePayerMatchesWallet } from "../lib/payer-bind.js";
 
 /**
  * Three loan-management proxies:
@@ -52,6 +53,8 @@ export async function buildExtendHandler(c: Context) {
   const borrower = validatePubkey((body as Record<string, unknown>).borrower_wallet);
   const loanPda = validatePubkey((body as Record<string, unknown>).loan_pda);
   if (!borrower || !loanPda) return c.json({ error: "missing_or_invalid_params", required: ["borrower_wallet", "loan_pda"] }, 400);
+  const mismatch = enforcePayerMatchesWallet(c, borrower);
+  if (mismatch) return mismatch;
   const { status, data } = await proxyToBot("/api/v1/agent/build-extend", { borrower_wallet: borrower, loan_pda: loanPda });
   return c.json(data as Record<string, unknown>, status as never);
 }
@@ -66,9 +69,11 @@ export async function buildTopupHandler(c: Context) {
   const borrower = validatePubkey(b.borrower_wallet);
   const loanPda = validatePubkey(b.loan_pda);
   const extra = String(b.extra_collateral_amount ?? "");
-  if (!borrower || !loanPda || !/^\d+$/.test(extra)) {
+  if (!borrower || !loanPda || !/^\d{1,20}$/.test(extra)) {
     return c.json({ error: "missing_or_invalid_params", required: ["borrower_wallet", "loan_pda", "extra_collateral_amount (u64 string)"] }, 400);
   }
+  const mismatch = enforcePayerMatchesWallet(c, borrower);
+  if (mismatch) return mismatch;
   const { status, data } = await proxyToBot("/api/v1/agent/build-topup", {
     borrower_wallet: borrower, loan_pda: loanPda, extra_collateral_amount: extra,
   });
@@ -85,9 +90,11 @@ export async function buildPartialRepayHandler(c: Context) {
   const borrower = validatePubkey(b.borrower_wallet);
   const loanPda = validatePubkey(b.loan_pda);
   const lamports = String(b.repay_lamports ?? "");
-  if (!borrower || !loanPda || !/^\d+$/.test(lamports)) {
+  if (!borrower || !loanPda || !/^\d{1,20}$/.test(lamports)) {
     return c.json({ error: "missing_or_invalid_params", required: ["borrower_wallet", "loan_pda", "repay_lamports (u64 string)"] }, 400);
   }
+  const mismatch = enforcePayerMatchesWallet(c, borrower);
+  if (mismatch) return mismatch;
   const { status, data } = await proxyToBot("/api/v1/agent/build-partial-repay", {
     borrower_wallet: borrower, loan_pda: loanPda, repay_lamports: lamports,
   });
