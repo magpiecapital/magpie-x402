@@ -246,6 +246,29 @@ export async function listLimitCloseHandler(c: Context) {
 }
 
 /**
+ * GET /api/v1/agent/limit-close/delegations  — discover what this
+ * agent is authorized for.
+ *
+ * Free. Scoped by X-Agent-Pubkey header. Returns every active
+ * (user_wallet, bounds, usage) tuple the agent can operate against.
+ *
+ * Standard startup call for an agent: hit this once to see "what
+ * surface am I working over today?", cache, then call POST /arm as
+ * orders come in. The `usage` block tells the agent how many active
+ * orders it already has per wallet vs the cap — so it can decide
+ * whether to arm a new order without round-tripping.
+ */
+export async function listDelegationsHandler(c: Context) {
+  if (!INTERNAL_TOKEN) return unconfigured(c);
+  const agentPubkey = c.req.header("x-agent-pubkey") ?? "";
+  try { new PublicKey(agentPubkey); }
+  catch { return c.json({ error: "missing_or_invalid_agent_pubkey_header" }, 400); }
+
+  const url = `${BOT_API}/api/v1/internal/agent/limit-close/delegations?agent=${encodeURIComponent(agentPubkey)}`;
+  return forward(c, url, { method: "GET" });
+}
+
+/**
  * DELETE /api/v1/agent/limit-close?id=<order_id>  — cancel an armed order.
  *
  * Free. The bot's UPDATE WHERE status='armed' makes a too-late cancel

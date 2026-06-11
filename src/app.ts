@@ -46,6 +46,7 @@ import {
   getLimitCloseHandler,
   listLimitCloseHandler,
   cancelLimitCloseHandler,
+  listDelegationsHandler,
 } from "./routes/agent-limit-close.js";
 import { tokenRiskHandler } from "./routes/token-risk.js";
 import { TIERS } from "./lib/tiers.js";
@@ -139,6 +140,7 @@ app.get("/", (c) =>
         "POST /api/v1/agent/limit-close — 0.001 SOL (arm a limit-close+sell order against a borrower's loan; borrower must pre-authorize via TG /agent-authorize)",
         "GET /api/v1/agent/limit-close?id=<order_id> — FREE (X-Agent-Pubkey header)",
         "GET /api/v1/agent/limit-close/list — FREE (X-Agent-Pubkey header)",
+        "GET /api/v1/agent/limit-close/delegations — FREE (X-Agent-Pubkey header; discover authorized wallets + bounds + headroom)",
         "DELETE /api/v1/agent/limit-close?id=<order_id> — FREE (X-Agent-Pubkey header)",
       ],
       examples: "https://github.com/magpiecapital/magpie-x402/tree/main/examples",
@@ -796,6 +798,7 @@ if (PAY_TO) {
   );
   app.get("/api/v1/agent/limit-close", getLimitCloseHandler);
   app.get("/api/v1/agent/limit-close/list", listLimitCloseHandler);
+  app.get("/api/v1/agent/limit-close/delegations", listDelegationsHandler);
   app.delete("/api/v1/agent/limit-close", cancelLimitCloseHandler);
 } else {
   // Surfaces a clear "service misconfigured" error instead of a silent
