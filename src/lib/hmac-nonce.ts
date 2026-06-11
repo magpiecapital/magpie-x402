@@ -36,10 +36,19 @@ const NONCE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 function secret(): Buffer {
   const raw = process.env.X402_NONCE_SECRET;
   if (!raw || raw.length < 16) {
+    // Production refuses to start: an ephemeral per-process secret would
+    // silently invalidate every nonce across cold starts and the dev-
+    // fallback warning is invisible in serverless logs. Fail loudly
+    // instead so the operator catches this before customers hit weird
+    // bad_mac rejections.
+    if (process.env.NODE_ENV === "production") {
+      throw new Error(
+        "[x402] X402_NONCE_SECRET must be set to a stable 16+ char value in production. " +
+        "Refusing to mint ephemeral nonces.",
+      );
+    }
     // Dev fallback — random per-process so signed nonces are still
-    // validatable within the same process lifetime. Production MUST
-    // set X402_NONCE_SECRET to a stable 32+ char value or nonces
-    // become invalid on every cold start.
+    // validatable within the same process lifetime.
     if (!process.env._X402_DEV_WARNED) {
       console.warn(
         "[x402] X402_NONCE_SECRET not set — using ephemeral per-process secret. " +
