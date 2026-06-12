@@ -284,6 +284,45 @@ export async function listDelegationsHandler(c: Context) {
 }
 
 /**
+ * GET /api/v1/agent/limit-close/eligible-loans  — the agent's full
+ * actionable surface.
+ *
+ * Free. Scoped by X-Agent-Pubkey header.
+ *
+ * Returns every (user_wallet, loan) tuple where this agent has an
+ * active delegation, with EXPLICIT eligibility for each loan:
+ *
+ *   - is_eligible:        boolean
+ *   - ineligibility_reasons: array of strings (empty when eligible)
+ *
+ * The reasons include things like:
+ *   - 'loan_below_minimum_size'
+ *   - 'rwa_collateral_not_supported_in_v1'
+ *   - 'loan_already_has_active_order'
+ *   - 'loan_exceeds_delegation_per_order_cap'
+ *   - 'agent_concurrency_cap_reached'
+ *
+ * Agents typically call this on startup + every 60s during operation.
+ * It gives them everything they need to decide what to arm without
+ * paying for guesses that the arm endpoint would reject.
+ *
+ * Implementation note: the bot side mirrors the arm endpoint's
+ * eligibility checks EXACTLY (same constants, same query patterns),
+ * so an 'is_eligible: true' here can never be reverted by a
+ * subsequent arm call without a real state change in between (loan
+ * status flip, new armed order from another agent, etc).
+ */
+export async function listEligibleLoansHandler(c: Context) {
+  if (!INTERNAL_TOKEN) return unconfigured(c);
+  const agentPubkey = c.req.header("x-agent-pubkey") ?? "";
+  try { new PublicKey(agentPubkey); }
+  catch { return c.json({ error: "missing_or_invalid_agent_pubkey_header" }, 400); }
+
+  const url = `${BOT_API}/api/v1/internal/agent/limit-close/eligible-loans?agent=${encodeURIComponent(agentPubkey)}`;
+  return forward(c, url, { method: "GET" });
+}
+
+/**
  * DELETE /api/v1/agent/limit-close?id=<order_id>  — cancel an armed order.
  *
  * Free. The bot's UPDATE WHERE status='armed' makes a too-late cancel
