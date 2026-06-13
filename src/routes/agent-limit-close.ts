@@ -234,6 +234,98 @@ export async function armLimitCloseHandler(c: Context) {
 }
 
 /**
+ * POST /api/v1/agent/limit-close/preflight  — "would this arm succeed?"
+ *
+ * Free. Same body shape as /arm but no x402 payment required. Lets
+ * agents check whether an arm with these parameters would succeed
+ * BEFORE paying. Returns 200 with would_arm=true on success, or the
+ * same error codes /arm would have returned on rejection.
+ *
+ * Why free: a preflight is a question the agent should be encouraged
+ * to ask. Charging x402 here would defeat the purpose — the whole
+ * point is to save the agent the per-arm fee on rejected configs.
+ *
+ * Agent identity comes from X-Agent-Pubkey header (same scoping
+ * model as /list and /get). Preflight is read-only on the database
+ * — the worst an unauthenticated abuser can do is enumerate "would
+ * any of these configs pass?", which leaks nothing beyond what /arm
+ * would leak anyway via its error codes.
+ *
+ * Liquidity can shift between preflight and arm, so a successful
+ * preflight is a strong hint, NOT a contractual reservation.
+ */
+export async function preflightLimitCloseHandler(c: Context) {
+  if (!INTERNAL_TOKEN) return unconfigured(c);
+
+  const agentPubkey = c.req.header("x-agent-pubkey") ?? "";
+  try { new PublicKey(agentPubkey); }
+  catch { return c.json({ error: "missing_or_invalid_agent_pubkey_header" }, 400); }
+
+  let body: unknown;
+  try { body = await c.req.json(); }
+  catch { return c.json({ error: "invalid_json" }, 400); }
+  const b = (body ?? {}) as Record<string, unknown>;
+
+  const userWallet         = String(b.user_wallet ?? "");
+  const loanId             = String(b.loan_id ?? "");
+  const triggerKind        = String(b.trigger_kind ?? "");
+  const triggerDirection   = String(b.trigger_direction ?? "above");
+  const triggerValueMicro  = String(b.trigger_value_micro ?? "");
+  const slippageBpsRaw     = Number(b.slippage_bps);
+  const sellDestination    = String(b.sell_destination ?? "sol").toLowerCase();
+  const expiresAt          = b.expires_at == null ? null : String(b.expires_at);
+  const autoEscalate       = b.auto_escalate_slippage === true;
+
+  // Shape validation (mirrors /arm so the agent sees the same 400s)
+  if (!userWallet || !loanId || !triggerKind || !triggerValueMicro) {
+    return c.json({ error: "missing_params" }, 400);
+  }
+  try { new PublicKey(userWallet); }
+  catch { return c.json({ error: "invalid_user_wallet" }, 400); }
+  if (!/^\d{1,20}$/.test(loanId)) {
+    return c.json({ error: "invalid_loan_id" }, 400);
+  }
+  if (!VALID_TRIGGER_KINDS.has(triggerKind)) {
+    return c.json({ error: "invalid_trigger_kind" }, 400);
+  }
+  if (!VALID_TRIGGER_DIRECTIONS.has(triggerDirection)) {
+    return c.json({ error: "invalid_trigger_direction" }, 400);
+  }
+  if (!/^\d{1,18}$/.test(triggerValueMicro)) {
+    return c.json({ error: "invalid_trigger_value" }, 400);
+  }
+  if (!Number.isInteger(slippageBpsRaw) || slippageBpsRaw < 10 || slippageBpsRaw > 1000) {
+    return c.json({ error: "invalid_slippage_bps" }, 400);
+  }
+  if (!VALID_DESTINATIONS.has(sellDestination)) {
+    return c.json({ error: "invalid_sell_destination" }, 400);
+  }
+  if (expiresAt && Number.isNaN(Date.parse(expiresAt))) {
+    return c.json({ error: "invalid_expires_at" }, 400);
+  }
+  if (agentPubkey === userWallet) {
+    return c.json({ error: "self_arm_not_allowed" }, 400);
+  }
+
+  return forward(c, `${BOT_API}/api/v1/internal/agent/limit-close/preflight`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      user_wallet: userWallet,
+      agent_pubkey: agentPubkey,
+      loan_id: loanId,
+      trigger_kind: triggerKind,
+      trigger_direction: triggerDirection,
+      trigger_value_micro: triggerValueMicro,
+      slippage_bps: slippageBpsRaw,
+      sell_destination: sellDestination,
+      expires_at: expiresAt,
+      auto_escalate_slippage: autoEscalate,
+    }),
+  });
+}
+
+/**
  * GET /api/v1/agent/limit-close?id=<order_id>  — read one order.
  *
  * Free, scoped to the calling agent. The agent pubkey is asserted via
