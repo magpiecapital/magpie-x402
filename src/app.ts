@@ -43,6 +43,7 @@ import {
 import { buildLiquidateHandler } from "./routes/agent-liquidate.js";
 import {
   armLimitCloseHandler,
+  preflightLimitCloseHandler,
   getLimitCloseHandler,
   listLimitCloseHandler,
   listEligibleLoansHandler,
@@ -139,6 +140,7 @@ app.get("/", (c) =>
         "GET /api/v1/agent/intent?id=<intent_id> — 0.0005 SOL",
         "GET /api/v1/agent/intents?wallet=<pubkey> — 0.001 SOL",
         "POST /api/v1/agent/limit-close — 0.001 SOL (arm a limit-close+sell order against a borrower's loan; borrower must pre-authorize via TG /agent-authorize)",
+        "POST /api/v1/agent/limit-close/preflight — FREE (X-Agent-Pubkey header; dry-run the same arm body to check 'would this succeed?' before paying)",
         "GET /api/v1/agent/limit-close?id=<order_id> — FREE (X-Agent-Pubkey header)",
         "GET /api/v1/agent/limit-close/list — FREE (X-Agent-Pubkey header)",
         "GET /api/v1/agent/limit-close/delegations — FREE (X-Agent-Pubkey header; discover authorized wallets + bounds + headroom)",
@@ -798,6 +800,10 @@ if (PAY_TO) {
     }),
     armLimitCloseHandler,
   );
+  // Free preflight — same body shape as /arm, no x402 payment. Lets
+  // agents check "would this arm succeed?" before paying. Saves
+  // arm-fees on rejected configs.
+  app.post("/api/v1/agent/limit-close/preflight", preflightLimitCloseHandler);
   app.get("/api/v1/agent/limit-close", getLimitCloseHandler);
   app.get("/api/v1/agent/limit-close/list", listLimitCloseHandler);
   app.get("/api/v1/agent/limit-close/delegations", listDelegationsHandler);
