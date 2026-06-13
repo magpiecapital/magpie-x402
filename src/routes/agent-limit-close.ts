@@ -354,6 +354,87 @@ export async function getLimitCloseHandler(c: Context) {
 }
 
 /**
+ * PATCH /api/v1/agent/limit-close/modify  — in-place modify an armed order.
+ *
+ * Free (no x402 charge). The agent already paid for the slot at arm
+ * time; modify is just steering, not occupying. Pairs with bot PR
+ * #148 which adds the shared modifyOrder() in arm-core.
+ *
+ * Body: { id, trigger_value_micro?, slippage_bps?, sell_destination?, expires_at? }
+ * Headers: X-Agent-Pubkey (asserts identity; bot internal scopes
+ *          modifications to source='agent_x402' + matching pubkey)
+ *
+ * What the agent can change without re-paying:
+ *   - trigger_value_micro (move the price target)
+ *   - slippage_bps        (cannot exceed the order's existing cap)
+ *   - sell_destination    (sol ↔ usdc)
+ *   - expires_at          (or null to clear)
+ *
+ * What the agent CAN'T change via modify (force cancel + re-arm):
+ *   - trigger_kind        (unit change is semantically distinct)
+ *   - trigger_direction   (TP ↔ SL change is semantically distinct)
+ *   - loan_id             (different loan = different order)
+ *
+ * Race-safe: if the engine flipped status to 'firing' between read
+ * and write, the bot returns 409 not_modifiable_or_not_found.
+ */
+export async function modifyLimitCloseHandler(c: Context) {
+  if (!INTERNAL_TOKEN) return unconfigured(c);
+
+  const agentPubkey = c.req.header("x-agent-pubkey") ?? "";
+  try { new PublicKey(agentPubkey); }
+  catch { return c.json({ error: "missing_or_invalid_agent_pubkey_header" }, 400); }
+
+  let body: unknown;
+  try { body = await c.req.json(); }
+  catch { return c.json({ error: "invalid_json" }, 400); }
+  const b = (body ?? {}) as Record<string, unknown>;
+
+  const idRaw = String(b.id ?? "");
+  if (!/^\d{1,12}$/.test(idRaw)) {
+    return c.json({ error: "missing_or_invalid_id" }, 400);
+  }
+
+  // Pass-through validation. The bot endpoint re-validates each field
+  // canonically; we only catch the trivial type errors here so the
+  // agent sees a useful 400 before we round-trip to the bot.
+  const forwardBody: Record<string, unknown> = { id: idRaw, agent_pubkey: agentPubkey };
+  if (b.trigger_value_micro !== undefined) {
+    const v = String(b.trigger_value_micro);
+    if (!/^\d{1,18}$/.test(v)) return c.json({ error: "invalid_trigger_value" }, 400);
+    forwardBody.trigger_value_micro = v;
+  }
+  if (b.slippage_bps !== undefined) {
+    if (!Number.isInteger(b.slippage_bps) || (b.slippage_bps as number) < 10) {
+      return c.json({ error: "invalid_slippage_bps" }, 400);
+    }
+    forwardBody.slippage_bps = b.slippage_bps;
+  }
+  if (b.sell_destination !== undefined) {
+    const v = String(b.sell_destination).toLowerCase();
+    if (v !== "sol" && v !== "usdc") return c.json({ error: "invalid_sell_destination" }, 400);
+    forwardBody.sell_destination = v;
+  }
+  if (b.expires_at !== undefined) {
+    if (b.expires_at === null) forwardBody.expires_at = null;
+    else if (Number.isNaN(Date.parse(String(b.expires_at)))) {
+      return c.json({ error: "invalid_expires_at" }, 400);
+    } else {
+      forwardBody.expires_at = String(b.expires_at);
+    }
+  }
+  if (Object.keys(forwardBody).length <= 2) {
+    return c.json({ error: "no_changes_supplied" }, 400);
+  }
+
+  return forward(c, `${BOT_API}/api/v1/internal/agent/limit-close/modify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(forwardBody),
+  });
+}
+
+/**
  * GET /api/v1/agent/limit-close/list[?status=all]  — list agent's orders.
  *
  * Same scoping as the single-read handler.
