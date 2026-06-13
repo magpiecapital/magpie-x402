@@ -163,6 +163,34 @@ for (const d of delegations.delegations) {
 
 A `would_arm: true` response is a STRONG hint, not a contractual reservation — liquidity can shift between preflight and arm, so be prepared to handle arm-time rejection. But preflight catches 95%+ of the cases where you'd burn an arm fee on a config that was never going to succeed.
 
+### Hold TP + SL on the same loan (multi-leg)
+
+An agent (or borrower) can arm BOTH a take-profit AND a stop-loss on the same loan simultaneously — they protect opposite sides of the position.
+
+```ts
+// First leg: TP at 1.05x
+await client.payAndPost("/api/v1/agent/limit-close", {
+  user_wallet: w, loan_id: id,
+  trigger_kind: "price_usd",
+  trigger_value_micro: tpMicros,
+  trigger_direction: "above",     // ← TP
+  slippage_bps: 200, sell_destination: "sol",
+  auto_escalate_slippage: true,
+});
+
+// Second leg: SL at 0.85x — same loan, opposite direction
+await client.payAndPost("/api/v1/agent/limit-close", {
+  user_wallet: w, loan_id: id,
+  trigger_kind: "price_usd",
+  trigger_value_micro: slMicros,
+  trigger_direction: "below",     // ← SL
+  slippage_bps: 300, sell_destination: "sol",
+  auto_escalate_slippage: true,
+});
+```
+
+Both arms count separately against `max_active_orders`. When ONE side fires, the loan is closed (collateral sold, repay done) so the OTHER side is auto-cancelled by the engine with `cancellation_reason = "sibling_order_fired"` — you'll see that on a subsequent GET of the order. **Don't try to arm a second TP or a second SL on the same loan** — that throws `loan_already_has_active_order_in_direction`.
+
 ### Use modify, not cancel + re-arm
 
 If the market moves and you want to chase the price, **PATCH /modify** is free and atomic:
@@ -221,7 +249,8 @@ Every endpoint returns the same error code on the same condition. Key codes:
 | `rwa_collateral_not_supported_in_v1` | 409 | RWA collateral; limit-close v1 is memecoin-only. |
 | `trigger_would_fire_immediately` | 409 | TP set at or below current; SL set at or above current. Move the target. |
 | `sl_below_solvency` | 409 | Stop-loss target so low that fire proceeds couldn't cover loan repay. Move the target up. |
-| `loan_already_has_active_order` | 409 | Already an armed order on that loan. Use `PATCH /modify` instead. |
+| `loan_already_has_active_order` | 409 | (Legacy) Already an armed order on that loan. Pre-multi-leg shape — superseded by the per-direction code below. |
+| `loan_already_has_active_order_in_direction` | 409 | Already an armed order in the same `trigger_direction`. The OTHER direction is still open — TP+SL on the same loan is supported (multi-leg). Detail field carries `direction`. |
 | `agent_concurrency_cap_reached` | 429 | You've hit the borrower's `max_active_orders` for this wallet. |
 | `user_concurrency_cap_reached` | 429 | The borrower has hit the protocol-wide 10-active-orders cap. |
 | `not_modifiable_or_not_found` | 409 | Race with the engine firing the order, or the order is closed. |
