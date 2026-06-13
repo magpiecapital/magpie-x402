@@ -44,6 +44,11 @@ const INTERNAL_TOKEN = process.env.INTERNAL_API_TOKEN || "";
 
 const VALID_TRIGGER_KINDS = new Set(["mc_usd", "price_usd", "price_sol"]);
 const VALID_DESTINATIONS = new Set(["sol", "usdc"]);
+// 2026-06-13: bot PR #121 added trigger_direction to the internal arm
+// endpoint so agents can arm stop-loss orders (was TP-only). This route
+// now passes the field through. Default 'above' preserves back-compat
+// for any agent that already integrated against the TP-only surface.
+const VALID_TRIGGER_DIRECTIONS = new Set(["above", "below"]);
 
 function unconfigured(c: Context) {
   return c.json(
@@ -130,6 +135,9 @@ export async function armLimitCloseHandler(c: Context) {
   const userWallet         = String(b.user_wallet ?? "");
   const loanId             = String(b.loan_id ?? "");
   const triggerKind        = String(b.trigger_kind ?? "");
+  // Default 'above' (take-profit) — keeps existing agents working
+  // unchanged. Agents wanting stop-loss pass `"trigger_direction": "below"`.
+  const triggerDirection   = String(b.trigger_direction ?? "above");
   const triggerValueMicro  = String(b.trigger_value_micro ?? "");
   const slippageBpsRaw     = Number(b.slippage_bps);
   const sellDestination    = String(b.sell_destination ?? "sol").toLowerCase();
@@ -154,6 +162,8 @@ export async function armLimitCloseHandler(c: Context) {
         optional: {
           sell_destination: "sol|usdc, default sol",
           expires_at: "ISO timestamp",
+          trigger_direction: "'above' (take-profit, default) | 'below' (stop-loss)",
+          auto_escalate_slippage: "boolean, default false — let the engine widen toward the delegation's max_slippage_bps if first attempt would revert",
         },
       },
       400,
@@ -169,6 +179,12 @@ export async function armLimitCloseHandler(c: Context) {
   }
   if (!VALID_TRIGGER_KINDS.has(triggerKind)) {
     return c.json({ error: "invalid_trigger_kind" }, 400);
+  }
+  if (!VALID_TRIGGER_DIRECTIONS.has(triggerDirection)) {
+    return c.json(
+      { error: "invalid_trigger_direction", detail: "must be 'above' (take-profit, default) or 'below' (stop-loss)" },
+      400,
+    );
   }
   if (!/^\d{1,18}$/.test(triggerValueMicro)) {
     return c.json({ error: "invalid_trigger_value", detail: "decimal string up to 1e15 micros" }, 400);
@@ -206,6 +222,7 @@ export async function armLimitCloseHandler(c: Context) {
       agent_pubkey: agentPubkey,
       loan_id: loanId,
       trigger_kind: triggerKind,
+      trigger_direction: triggerDirection,
       trigger_value_micro: triggerValueMicro,
       slippage_bps: slippageBpsRaw,
       sell_destination: sellDestination,
