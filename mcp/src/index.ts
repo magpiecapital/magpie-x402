@@ -33,6 +33,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 import { call, loadKeypairFromEnv, type ClientCtx } from "./x402-client.js";
+import { routeParityTool } from "./tool-routing.js";
 
 const baseUrl = process.env.MAGPIE_X402_BASE_URL ?? "https://x402.magpie.capital";
 const rpcUrl = process.env.SOLANA_RPC_URL ?? "https://api.mainnet-beta.solana.com";
@@ -286,6 +287,233 @@ const TOOLS = [
       required: ["id"],
     },
   },
+  {
+    name: "magpie_credit_attest",
+    description:
+      "Fetch a lender-signed, portable Magpie credit attestation for a wallet. The ed25519-signed payload has a 7-day TTL. Paid: 0.0005 SOL.",
+    inputSchema: {
+      type: "object",
+      properties: { wallet: { type: "string" } },
+      required: ["wallet"],
+    },
+  },
+  {
+    name: "magpie_build_extend",
+    description:
+      "Build an unsigned transaction that extends an existing loan. Paid: 0.002 SOL.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        borrower_wallet: { type: "string" },
+        loan_pda: { type: "string" },
+      },
+      required: ["borrower_wallet", "loan_pda"],
+    },
+  },
+  {
+    name: "magpie_build_topup",
+    description:
+      "Build an unsigned transaction that adds collateral to an existing loan. Paid: 0.002 SOL.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        borrower_wallet: { type: "string" },
+        loan_pda: { type: "string" },
+        extra_collateral_amount: {
+          type: "string",
+          pattern: "^[0-9]{1,20}$",
+        },
+      },
+      required: ["borrower_wallet", "loan_pda", "extra_collateral_amount"],
+    },
+  },
+  {
+    name: "magpie_build_partial_repay",
+    description:
+      "Build an unsigned transaction that partially repays an existing loan. Paid: 0.002 SOL.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        borrower_wallet: { type: "string" },
+        loan_pda: { type: "string" },
+        repay_lamports: { type: "string", pattern: "^[0-9]{1,20}$" },
+      },
+      required: ["borrower_wallet", "loan_pda", "repay_lamports"],
+    },
+  },
+  {
+    name: "magpie_cancel_intent",
+    description:
+      "Cancel a pending conditional borrow intent. Free.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", pattern: "^[A-Za-z0-9_-]{16,32}$" },
+      },
+      required: ["id"],
+    },
+  },
+  {
+    name: "magpie_list_intents",
+    description:
+      "List conditional borrow intents for the configured payer wallet. Paid: 0.001 SOL.",
+    inputSchema: {
+      type: "object",
+      properties: { wallet: { type: "string" } },
+      required: ["wallet"],
+    },
+  },
+  {
+    name: "magpie_limit_close_arm",
+    description:
+      "Arm a delegated take-profit or stop-loss order for a borrower's loan. The configured payer is the agent identity and must already be authorized by the borrower. Paid: 0.001 SOL.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        user_wallet: { type: "string" },
+        loan_id: { type: "string", pattern: "^[0-9]{1,20}$" },
+        trigger_kind: {
+          type: "string",
+          enum: ["mc_usd", "price_usd", "price_sol"],
+        },
+        trigger_direction: {
+          type: "string",
+          enum: ["above", "below"],
+          default: "above",
+        },
+        trigger_value_micro: {
+          type: "string",
+          pattern: "^[0-9]{1,18}$",
+        },
+        slippage_bps: { type: "integer", minimum: 10, maximum: 1000 },
+        sell_destination: {
+          type: "string",
+          enum: ["sol", "usdc"],
+          default: "sol",
+        },
+        expires_at: { type: "string", format: "date-time" },
+        auto_escalate_slippage: { type: "boolean", default: false },
+      },
+      required: [
+        "user_wallet",
+        "loan_id",
+        "trigger_kind",
+        "trigger_value_micro",
+        "slippage_bps",
+      ],
+    },
+  },
+  {
+    name: "magpie_limit_close_preflight",
+    description:
+      "Dry-run a limit-close arm with the configured payer pubkey as agent identity. Free and does not reserve a slot.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        user_wallet: { type: "string" },
+        loan_id: { type: "string", pattern: "^[0-9]{1,20}$" },
+        trigger_kind: {
+          type: "string",
+          enum: ["mc_usd", "price_usd", "price_sol"],
+        },
+        trigger_direction: {
+          type: "string",
+          enum: ["above", "below"],
+          default: "above",
+        },
+        trigger_value_micro: {
+          type: "string",
+          pattern: "^[0-9]{1,18}$",
+        },
+        slippage_bps: { type: "integer", minimum: 10, maximum: 1000 },
+        sell_destination: {
+          type: "string",
+          enum: ["sol", "usdc"],
+          default: "sol",
+        },
+        expires_at: { type: "string", format: "date-time" },
+        auto_escalate_slippage: { type: "boolean", default: false },
+      },
+      required: [
+        "user_wallet",
+        "loan_id",
+        "trigger_kind",
+        "trigger_value_micro",
+        "slippage_bps",
+      ],
+    },
+  },
+  {
+    name: "magpie_limit_close_get",
+    description:
+      "Read one limit-close order owned by the configured payer agent. Free.",
+    inputSchema: {
+      type: "object",
+      properties: { id: { type: "string", pattern: "^[0-9]{1,12}$" } },
+      required: ["id"],
+    },
+  },
+  {
+    name: "magpie_limit_close_modify",
+    description:
+      "Modify an armed limit-close order owned by the configured payer agent. Supports trigger value, slippage, destination, and expiry. Free.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", pattern: "^[0-9]{1,12}$" },
+        trigger_value_micro: {
+          type: "string",
+          pattern: "^[0-9]{1,18}$",
+        },
+        slippage_bps: { type: "integer", minimum: 10, maximum: 1000 },
+        sell_destination: { type: "string", enum: ["sol", "usdc"] },
+        expires_at: {
+          anyOf: [
+            { type: "string", format: "date-time" },
+            { type: "null" },
+          ],
+        },
+      },
+      required: ["id"],
+    },
+  },
+  {
+    name: "magpie_limit_close_list",
+    description:
+      "List limit-close orders owned by the configured payer agent. Free.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        status: {
+          type: "string",
+          enum: ["armed", "all"],
+          default: "armed",
+        },
+      },
+    },
+  },
+  {
+    name: "magpie_limit_close_delegations",
+    description:
+      "List active borrower delegations, bounds, and capacity for the configured payer agent. Free.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "magpie_limit_close_eligible_loans",
+    description:
+      "List delegated borrower loans with explicit limit-close eligibility and ineligibility reasons for the configured payer agent. Free.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "magpie_limit_close_cancel",
+    description:
+      "Cancel an armed limit-close order owned by the configured payer agent. Free and race-safe.",
+    inputSchema: {
+      type: "object",
+      properties: { id: { type: "string", pattern: "^[0-9]{1,12}$" } },
+      required: ["id"],
+    },
+  },
 ] as const;
 
 // ── Server wiring ─────────────────────────────────────────────────
@@ -399,11 +627,26 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           query: { id: String(a.id) },
         });
         break;
-      default:
-        return {
-          isError: true,
-          content: [{ type: "text", text: `unknown tool: ${name}` }],
-        };
+      default: {
+        const request = routeParityTool(
+          name,
+          a,
+          payer?.publicKey.toBase58(),
+        );
+        if (!request) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: `unknown tool: ${name}` }],
+          };
+        }
+        result = await call(
+          ctx,
+          request.method,
+          request.path,
+          request.init,
+        );
+        break;
+      }
     }
     return {
       content: [
