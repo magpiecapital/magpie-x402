@@ -6,9 +6,9 @@ Drop one config block into your host and your agent can query Magpie's protocol 
 
 ## What it exposes
 
-19 tools wrapping the x402 endpoints:
+34 tools wrapping the x402 endpoints:
 
-**Free reads (work out of the box):**
+**General free reads and cleanup (work out of the box):**
 - `magpie_pool_state` — live LendingPool account
 - `magpie_protocol_pulse` — 24h aggregates (active loans, volume, liquidations)
 - `magpie_recent_activity` — anonymized borrow/repay/liquidate stream
@@ -20,17 +20,33 @@ Drop one config block into your host and your agent can query Magpie's protocol 
 - `magpie_liquidatable` — loans currently liquidatable
 - `magpie_credit_leaderboard` — top wallets by credit score
 - `magpie_lp_state` — depositor position + pool context
+- `magpie_cancel_intent` — cancel a pending conditional borrow intent
+
+**Free agent-scoped limit-close management (requires a configured keypair for identity, but spends no SOL):**
+- `magpie_limit_close_preflight` — dry-run an arm before paying
+- `magpie_limit_close_get` — read one order
+- `magpie_limit_close_modify` — steer trigger, slippage, destination, or expiry
+- `magpie_limit_close_list` — list the agent's orders
+- `magpie_limit_close_delegations` — inspect borrower authorizations and bounds
+- `magpie_limit_close_eligible_loans` — discover actionable delegated loans
+- `magpie_limit_close_cancel` — cancel an armed order
 
 **Paid (require a configured Solana keypair):**
 - `magpie_credit_score` — 0.001 SOL
+- `magpie_credit_attest` — 0.0005 SOL (portable signed credit proof)
 - `magpie_token_risk` — 0.001 SOL (per-token risk profile)
 - `magpie_build_borrow` — 0.005 SOL
 - `magpie_build_repay` — 0.002 SOL
+- `magpie_build_extend` — 0.002 SOL
+- `magpie_build_topup` — 0.002 SOL
+- `magpie_build_partial_repay` — 0.002 SOL
 - `magpie_build_deposit` — 0.002 SOL
 - `magpie_build_withdraw` — 0.002 SOL
 - `magpie_build_liquidate` — 0.003 SOL (liquidate a past-due loan, receive keeper bounty)
 - `magpie_create_intent` — 0.01 SOL (conditional borrow)
 - `magpie_get_intent` — 0.0005 SOL (poll)
+- `magpie_list_intents` — 0.001 SOL
+- `magpie_limit_close_arm` — 0.001 SOL (delegated TP/SL order)
 
 When a paid tool fires, the server signs an x402 payment tx locally with your configured keypair and forwards the signature to magpie-x402. The keypair never leaves your machine.
 
@@ -116,7 +132,9 @@ Use the same shape — point the host at `node /ABS/PATH/.../mcp/dist/index.js`,
 
 ## Free-only mode (no keypair)
 
-Omit `MAGPIE_MCP_PAYER_KEYPAIR` and all 11 free tools still work. Paid tools return a clear error explaining that no payer is configured. Useful for read-only research agents or as a no-friction first install.
+Omit `MAGPIE_MCP_PAYER_KEYPAIR` and all 12 general free tools still work. Paid tools return a clear error explaining that no payer is configured.
+
+The seven free limit-close management tools also require the keypair because its public key is sent as `X-Agent-Pubkey` to scope orders and delegations. Those calls do not create a payment transaction or spend SOL.
 
 ## Environment variables
 

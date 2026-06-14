@@ -34,18 +34,27 @@ export interface PaidResult<T> {
   } | null;
 }
 
+export interface CallInit {
+  query?: Record<string, string>;
+  body?: unknown;
+  headers?: Record<string, string>;
+}
+
 export async function call<T = unknown>(
   ctx: ClientCtx,
-  method: "GET" | "POST" | "DELETE",
+  method: "GET" | "POST" | "PATCH" | "DELETE",
   path: string,
-  init: { query?: Record<string, string>; body?: unknown } = {},
+  init: CallInit = {},
 ): Promise<PaidResult<T>> {
   const url = new URL(path, ctx.baseUrl);
   for (const [k, v] of Object.entries(init.query ?? {})) {
     url.searchParams.set(k, v);
   }
 
-  const headers: Record<string, string> = { Accept: "application/json" };
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+    ...init.headers,
+  };
   if (init.body !== undefined) headers["Content-Type"] = "application/json";
 
   const first = await fetch(url, {
