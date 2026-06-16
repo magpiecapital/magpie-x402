@@ -2,7 +2,7 @@
 
 Turn-key agent code that talks to the live x402 API at `https://x402.magpie.capital`. Pick the one closest to what your agent does, clone, edit one or two values, run.
 
-All examples are TypeScript, depend only on `@solana/web3.js`, and use the minimal client in [`lib/x402-client.ts`](./lib/x402-client.ts) (~150 lines, copy into your project).
+All examples are TypeScript and use the minimal client in [`lib/x402-client.ts`](./lib/x402-client.ts) (~150 lines, copy into your project). Most examples only need `@solana/web3.js`; the portfolio-risk example also uses `tweetnacl` and `bs58` to verify the signed credit attestation.
 
 ## Quickstart
 
@@ -10,6 +10,8 @@ All examples are TypeScript, depend only on `@solana/web3.js`, and use the minim
 git clone git@github.com:magpiecapital/magpie-x402.git
 cd magpie-x402
 npm install
+npm --prefix examples install
+npm --prefix examples run typecheck
 
 # Set the wallet your agent pays with (any keypair JSON file).
 export X402_PAYER_KEYPAIR=~/.config/solana/id.json
@@ -21,6 +23,7 @@ npx tsx examples/05-loan-monitor.ts <WALLET_PUBKEY>
 
 # Paid — needs ~0.01 SOL in the payer wallet to cover a few calls.
 npx tsx examples/01-fetch-credit-score.ts <WALLET_PUBKEY>
+npm --prefix examples run portfolio-risk -- <WALLET_PUBKEY>
 ```
 
 ## The examples
@@ -37,6 +40,41 @@ npx tsx examples/01-fetch-credit-score.ts <WALLET_PUBKEY>
 | [08-liquidation-keeper.ts](./08-liquidation-keeper.ts) | 0.003 SOL per attempt | `GET /markets/liquidatable` + `POST /agent/build-liquidate` | Full liquidation loop: poll the feed, pick most-past-due, build → sign → submit. Keeper bounty paid in collateral token. |
 | [09-webhook-receiver.ts](./09-webhook-receiver.ts) | 0.01 SOL one-shot | `POST /agent/intent` with `webhook_url` | Push notification on intent.matched — zero polling cost. HMAC-SHA256 signature verified constant-time. Compare to polling: 0.0005 SOL × 30s intervals = up to 0.06 SOL/hr saved. |
 | [10-equity-leverage-bot.ts](./10-equity-leverage-bot.ts) | 0.005 + 0.01 SOL | `simulate-borrow` → `build-borrow` → `intent` | **Premium Tier preview** — borrow SOL against tokenized equity (NVDAx/COINx/etc) without selling. Posts a 10%-drop stop-loss intent. Works today on standard catalog mints; switches to equity collateral the day Premium Tier ships. |
+| [11-portfolio-risk-agent.ts](./11-portfolio-risk-agent.ts) | 0.0015 SOL | `GET /credit-score` + `GET /agent/credit-attest` | Portfolio-risk gate for partner protocols: fetch score, fetch signed attestation, verify Ed25519 payload, emit a portable risk packet. |
+
+## Reference-agent coverage
+
+| Agent pattern | Example |
+|---------------|---------|
+| Borrowing | [`03-agent-borrow.ts`](./03-agent-borrow.ts) |
+| Liquidation | [`02-liquidation-bot.ts`](./02-liquidation-bot.ts), [`08-liquidation-keeper.ts`](./08-liquidation-keeper.ts) |
+| Yield | [`06-yield-agent.ts`](./06-yield-agent.ts) |
+| Portfolio risk | [`11-portfolio-risk-agent.ts`](./11-portfolio-risk-agent.ts) |
+
+## 11 - Portfolio-risk agent
+
+A partner protocol can use Magpie reputation without trusting Magpie's HTTP API at decision time: the agent pays for the weekly score lookup, fetches the cheaper signed attestation, verifies the Ed25519 payload locally, and forwards the resulting risk packet to the partner.
+
+```bash
+cp examples/.env.example examples/.env
+npm --prefix examples install
+npm --prefix examples run portfolio-risk -- <WALLET_PUBKEY>
+```
+
+Expected output:
+
+```json
+{
+  "wallet": "<WALLET_PUBKEY>",
+  "signatureCheck": { "verified": true, "signer": "<LENDER_AUTHORITY>" },
+  "partnerPacket": {
+    "score": 742,
+    "tier": "gold",
+    "signedPayload": "{...}",
+    "signature": "<base58-or-base64-signature>"
+  }
+}
+```
 
 ## Costs at a glance
 

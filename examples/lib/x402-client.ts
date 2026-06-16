@@ -15,6 +15,7 @@ import {
   TransactionInstruction,
   sendAndConfirmTransaction,
 } from "@solana/web3.js";
+import { readFileSync } from "node:fs";
 
 const MEMO_PROGRAM_ID = new PublicKey(
   "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr",
@@ -139,8 +140,6 @@ export async function freeGet<T = unknown>(
 
 /** Load a keypair from JSON array file (the format `solana-keygen` writes). */
 export function loadKeypairFromFile(path: string): Keypair {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const fs = require("node:fs") as typeof import("node:fs");
-  const raw = JSON.parse(fs.readFileSync(path, "utf8")) as number[];
+  const raw = JSON.parse(readFileSync(path, "utf8")) as number[];
   return Keypair.fromSecretKey(new Uint8Array(raw));
 }

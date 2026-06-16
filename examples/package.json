@@ -1,0 +1,25 @@
+{
+  "name": "@magpie-x402/examples",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "portfolio-risk": "tsx 11-portfolio-risk-agent.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@solana/web3.js": "1.95.0",
+    "bs58": "6.0.0",
+    "dotenv": "16.4.5",
+    "tweetnacl": "1.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "20.0.0",
+    "tsx": "4.0.0",
+    "typescript": "5.5.4"
+  },
+  "overrides": {
+    "rpc-websockets": {
+      "uuid": "8.3.2"
+    }
+  }
+}

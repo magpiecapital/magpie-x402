@@ -54,6 +54,7 @@
 | GET | `/api/v1/agent/leaderboard` | Free | Top wallets by Magpie credit score, anonymized. 60s cache. |
 | GET | `/api/v1/agent/lp-state?wallet=<pubkey>` | Free | Depositor position + pool context (shares, deposited, current value, yield, share-of-pool). 10s cache. |
 | GET | `/api/v1/credit-score?wallet=<pubkey>` | 0.001 SOL | Magpie credit score (300–850) + tier benefits |
+| GET | `/api/v1/agent/credit-attest?wallet=<pubkey>` | 0.0005 SOL | Ed25519-signed credit attestation portable to partner protocols |
 | POST | `/api/v1/agent/build-deposit` | 0.002 SOL | Build an unsigned LP-deposit tx (SOL → pool). Caller signs and submits. |
 | POST | `/api/v1/agent/build-withdraw` | 0.002 SOL | Build an unsigned LP-withdraw tx (shares → SOL). Server validates against the on-chain position and refuses unsafe chunk sizes. |
 
@@ -67,7 +68,7 @@ All free endpoints query the on-chain Magpie program directly and have proper `C
 >
 > 🎯 **Limit-close agent quickstart** — full end-to-end walkthrough for agents that arm, monitor, and steer limit-close (TP/SL) orders on borrowers' loans. Authorization flow, every endpoint, sample code, error reference, best practices. See [`docs/AGENT_QUICKSTART_LIMIT_CLOSE.md`](./docs/AGENT_QUICKSTART_LIMIT_CLOSE.md).
 >
-> 👉 **Just want code examples?** [`/examples/`](./examples/) — 10 turn-key TypeScript agents (credit fetch, liquidation keeper, full borrow loop, conditional intent, yield agent, webhook receiver, collateral screener, equity-leverage preview, more) that talk to the live production endpoint. Each is a single file, runs with `npx tsx`.
+> 👉 **Just want code examples?** [`/examples/`](./examples/) — 11 turn-key TypeScript agents (credit fetch, liquidation keeper, full borrow loop, conditional intent, yield agent, webhook receiver, collateral screener, equity-leverage preview, portfolio-risk attestation, more) that talk to the live production endpoint. Each is a single file, runs with `npx tsx`.
 >
 > 🧩 **Using Claude Desktop, Cursor, Windsurf, or ChatGPT desktop?** [`/mcp/`](./mcp/) ships a one-config-block MCP server that exposes the full API as native tools in your agent host. Free reads work without any keypair; paid endpoints sign x402 payments locally with a configured Solana wallet.
 
