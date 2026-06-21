@@ -36,11 +36,11 @@
  */
 import { Connection, Keypair, PublicKey, Transaction } from "@solana/web3.js";
 import { freeGet, paidCall, X402Context, X402Error } from "./x402.js";
-import { buildSignedEnvelope } from "./envelope.js";
+import { buildSignedEnvelope, buildManagementHeaders } from "./envelope.js";
 
 export { X402Error };
 export { verifyWebhookSignature, IntentMatchedPayload } from "./webhooks.js";
-export { buildSignedEnvelope, SignedEnvelope } from "./envelope.js";
+export { buildSignedEnvelope, buildManagementHeaders, envelopeHeaders, SignedEnvelope } from "./envelope.js";
 
 const DEFAULT_BASE_URL = "https://x402.magpie.capital";
 const DEFAULT_RPC_URL = "https://api.mainnet-beta.solana.com";
@@ -699,6 +699,199 @@ export class MagpieAgent {
   ): Promise<{ orders: unknown[] }> {
     const w = typeof wallet === "string" ? wallet : wallet.toBase58();
     return freeGet(this.ctx, "/api/v1/agent/self-limit-close/list", { wallet: w });
+  }
+
+  // ── Delegated exit orders — manage exits on ANOTHER wallet's loan ───
+  //
+  // These act on a BORROWER's loan that pre-authorized this agent off-band
+  // (TG /agent-authorize <agent_pubkey> limit_close). The x402 service used
+  // to trust a self-asserted X-Agent-Pubkey header here — meaning anyone
+  // could pass another agent's (public) pubkey to cancel / modify /
+  // enumerate that agent's armed orders, silently disarming a borrower's
+  // stop-loss (audit 2026-06-21, HIGH). Now every delegated management call
+  // is authenticated by an Ed25519-signed envelope sent in the three
+  // X-Magpie-Env-* headers: the service verifies the signature and uses the
+  // VERIFIED signer as the agent identity. These methods sign that envelope
+  // with the agent keypair so legitimate agents keep working. The paid
+  // delegated arm (armDelegatedExit) keeps its x402-payer binding and does
+  // not need a management envelope.
+
+  /**
+   * Arm a delegated limit-close order on a borrower's loan you've been
+   * authorized for (TG /agent-authorize). Paid: 0.001 SOL. The x402 payer
+   * (your keypair) is the agent identity; the bot enforces the delegation.
+   */
+  async armDelegatedExit(opts: {
+    userWallet: PublicKey | string;
+    loanId: string | bigint;
+    triggerKind: "mc_usd" | "price_usd" | "price_sol";
+    triggerValueMicro: string | bigint;
+    slippageBps: number;
+    triggerDirection?: "above" | "below";
+    sellDestination?: "sol" | "usdc";
+    expiresAt?: string | null;
+    autoEscalateSlippage?: boolean;
+  }): Promise<ExitOrderResult> {
+    this.requireKeypair("armDelegatedExit");
+    const userWallet =
+      typeof opts.userWallet === "string" ? opts.userWallet : opts.userWallet.toBase58();
+    const body: Record<string, unknown> = {
+      user_wallet: userWallet,
+      loan_id: String(opts.loanId),
+      trigger_kind: opts.triggerKind,
+      trigger_value_micro: String(opts.triggerValueMicro),
+      slippage_bps: opts.slippageBps,
+    };
+    if (opts.triggerDirection !== undefined) body.trigger_direction = opts.triggerDirection;
+    if (opts.sellDestination !== undefined) body.sell_destination = opts.sellDestination;
+    if (opts.expiresAt !== undefined) body.expires_at = opts.expiresAt;
+    if (opts.autoEscalateSlippage !== undefined) body.auto_escalate_slippage = opts.autoEscalateSlippage;
+    const r = await paidCall<Record<string, unknown>>(
+      this.ctx,
+      "POST",
+      "/api/v1/agent/limit-close",
+      { body },
+    );
+    return { order: r.data, feesPaidLamports: r.paid?.amountLamports ?? 0n };
+  }
+
+  /**
+   * Preflight a delegated arm — "would this arm succeed?" — without paying.
+   * Free. Signs a "limit-close-preflight/v1" envelope (no OrderId).
+   */
+  async preflightDelegatedExit(opts: {
+    userWallet: PublicKey | string;
+    loanId: string | bigint;
+    triggerKind: "mc_usd" | "price_usd" | "price_sol";
+    triggerValueMicro: string | bigint;
+    slippageBps: number;
+    triggerDirection?: "above" | "below";
+    sellDestination?: "sol" | "usdc";
+    expiresAt?: string | null;
+    autoEscalateSlippage?: boolean;
+  }): Promise<Record<string, unknown>> {
+    const keypair = this.requireKeypair("preflightDelegatedExit");
+    const userWallet =
+      typeof opts.userWallet === "string" ? opts.userWallet : opts.userWallet.toBase58();
+    const body: Record<string, unknown> = {
+      user_wallet: userWallet,
+      loan_id: String(opts.loanId),
+      trigger_kind: opts.triggerKind,
+      trigger_value_micro: String(opts.triggerValueMicro),
+      slippage_bps: opts.slippageBps,
+    };
+    if (opts.triggerDirection !== undefined) body.trigger_direction = opts.triggerDirection;
+    if (opts.sellDestination !== undefined) body.sell_destination = opts.sellDestination;
+    if (opts.expiresAt !== undefined) body.expires_at = opts.expiresAt;
+    if (opts.autoEscalateSlippage !== undefined) body.auto_escalate_slippage = opts.autoEscalateSlippage;
+    const r = await paidCall<Record<string, unknown>>(
+      this.ctx,
+      "POST",
+      "/api/v1/agent/limit-close/preflight",
+      { body, headers: buildManagementHeaders(keypair, "limit-close-preflight/v1") },
+    );
+    return r.data;
+  }
+
+  /**
+   * Read one delegated order by id. Free. Signs a "limit-close-get/v1"
+   * envelope bound to the order id.
+   */
+  async getDelegatedExit(orderId: string): Promise<Record<string, unknown>> {
+    const keypair = this.requireKeypair("getDelegatedExit");
+    return freeGet(
+      this.ctx,
+      "/api/v1/agent/limit-close",
+      { id: orderId },
+      buildManagementHeaders(keypair, "limit-close-get/v1", orderId),
+    );
+  }
+
+  /**
+   * List your delegated orders. Free. Signs a "limit-close-list/v1"
+   * envelope. `status: "all"` includes terminal orders (default armed-only).
+   */
+  async listDelegatedExits(opts: { status?: "armed" | "all" } = {}): Promise<{ orders: unknown[] }> {
+    const keypair = this.requireKeypair("listDelegatedExits");
+    const query: Record<string, string> = {};
+    if (opts.status === "all") query.status = "all";
+    return freeGet(
+      this.ctx,
+      "/api/v1/agent/limit-close/list",
+      query,
+      buildManagementHeaders(keypair, "limit-close-list/v1"),
+    );
+  }
+
+  /**
+   * Discover what borrowers/bounds this agent is authorized for. Free.
+   * Signs a "limit-close-delegations/v1" envelope.
+   */
+  async listDelegations(): Promise<Record<string, unknown>> {
+    const keypair = this.requireKeypair("listDelegations");
+    return freeGet(
+      this.ctx,
+      "/api/v1/agent/limit-close/delegations",
+      {},
+      buildManagementHeaders(keypair, "limit-close-delegations/v1"),
+    );
+  }
+
+  /**
+   * The agent's full actionable surface — every delegated (wallet, loan)
+   * with explicit per-loan eligibility. Free. Signs a
+   * "limit-close-eligible/v1" envelope.
+   */
+  async eligibleLoans(): Promise<Record<string, unknown>> {
+    const keypair = this.requireKeypair("eligibleLoans");
+    return freeGet(
+      this.ctx,
+      "/api/v1/agent/limit-close/eligible-loans",
+      {},
+      buildManagementHeaders(keypair, "limit-close-eligible/v1"),
+    );
+  }
+
+  /**
+   * Modify a delegated armed order in place (no re-pay). Free. Signs a
+   * "limit-close-modify/v1" envelope bound to the order id.
+   */
+  async modifyDelegatedExit(opts: {
+    orderId: string;
+    triggerValueMicro?: string | bigint;
+    slippageBps?: number;
+    sellDestination?: "sol" | "usdc";
+    expiresAt?: string | null;
+  }): Promise<Record<string, unknown>> {
+    const keypair = this.requireKeypair("modifyDelegatedExit");
+    const body: Record<string, unknown> = { id: opts.orderId };
+    if (opts.triggerValueMicro !== undefined) body.trigger_value_micro = String(opts.triggerValueMicro);
+    if (opts.slippageBps !== undefined) body.slippage_bps = opts.slippageBps;
+    if (opts.sellDestination !== undefined) body.sell_destination = opts.sellDestination;
+    if (opts.expiresAt !== undefined) body.expires_at = opts.expiresAt;
+    const r = await paidCall<Record<string, unknown>>(
+      this.ctx,
+      "POST",
+      "/api/v1/agent/limit-close/modify",
+      { body, headers: buildManagementHeaders(keypair, "limit-close-modify/v1", opts.orderId) },
+    );
+    return r.data;
+  }
+
+  /**
+   * Cancel a delegated armed order. Free. Signs a "limit-close-cancel/v1"
+   * envelope bound to the order id — the highest-impact route (a forged
+   * identity here would silently disarm a borrower's stop-loss).
+   */
+  async cancelDelegatedExit(orderId: string): Promise<Record<string, unknown>> {
+    const keypair = this.requireKeypair("cancelDelegatedExit");
+    const r = await paidCall<Record<string, unknown>>(
+      this.ctx,
+      "DELETE",
+      "/api/v1/agent/limit-close",
+      { query: { id: orderId }, headers: buildManagementHeaders(keypair, "limit-close-cancel/v1", orderId) },
+    );
+    return r.data;
   }
 
   // ── Internal helpers ───────────────────────────────────────────────

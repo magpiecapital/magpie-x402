@@ -1,5 +1,6 @@
 import type { Context } from "hono";
 import { PublicKey } from "@solana/web3.js";
+import { verifyAgentFromContext } from "../lib/agent-envelope.js";
 
 /**
  * Agent-mediated limit-close-and-sell — x402 routes.
@@ -245,11 +246,13 @@ export async function armLimitCloseHandler(c: Context) {
  * to ask. Charging x402 here would defeat the purpose — the whole
  * point is to save the agent the per-arm fee on rejected configs.
  *
- * Agent identity comes from X-Agent-Pubkey header (same scoping
- * model as /list and /get). Preflight is read-only on the database
- * — the worst an unauthenticated abuser can do is enumerate "would
- * any of these configs pass?", which leaks nothing beyond what /arm
- * would leak anyway via its error codes.
+ * Agent identity comes from a signed Ed25519 envelope (headers
+ * X-Magpie-Env-Msg / -Sig / -Signer, action "limit-close-preflight/v1";
+ * same scoping model as /list and /get). The verified signer — never a
+ * self-asserted header — is forwarded as agent_pubkey. Preflight is
+ * read-only on the database — the worst a (now signature-bound) caller
+ * can do is enumerate "would any of these configs pass?", which leaks
+ * nothing beyond what /arm would leak anyway via its error codes.
  *
  * Liquidity can shift between preflight and arm, so a successful
  * preflight is a strong hint, NOT a contractual reservation.
@@ -257,9 +260,9 @@ export async function armLimitCloseHandler(c: Context) {
 export async function preflightLimitCloseHandler(c: Context) {
   if (!INTERNAL_TOKEN) return unconfigured(c);
 
-  const agentPubkey = c.req.header("x-agent-pubkey") ?? "";
-  try { new PublicKey(agentPubkey); }
-  catch { return c.json({ error: "missing_or_invalid_agent_pubkey_header" }, 400); }
+  const verified = verifyAgentFromContext(c, "limit-close-preflight/v1", {});
+  if (!verified.ok) return c.json({ error: verified.error }, verified.status as never);
+  const agentPubkey = verified.signer;
 
   let body: unknown;
   try { body = await c.req.json(); }
@@ -328,16 +331,15 @@ export async function preflightLimitCloseHandler(c: Context) {
 /**
  * GET /api/v1/agent/limit-close?id=<order_id>  — read one order.
  *
- * Free, scoped to the calling agent. The agent pubkey is asserted via
- * X-Agent-Pubkey header (must be a valid base58 pubkey). Without a
- * payment binding the value of read access is low — agents need to
- * manage their own pipeline — but we still want a stable identity
- * for the bot's scoping filter.
+ * Free, scoped to the calling agent. The agent identity is proven by a
+ * signed Ed25519 envelope (headers X-Magpie-Env-Msg / -Sig / -Signer,
+ * action "limit-close-get/v1", OrderId bound to the queried id). The
+ * verified signer — never a self-asserted X-Agent-Pubkey header — is
+ * the agent's identity for the bot's scoping filter.
  *
- * Misuse risk is low: an attacker who guesses an order id sees only
- * its public-shape fields (no wallet derivation, no holdings, no PII).
- * But scoping by agent prevents agents from peeking at competitors'
- * orders.
+ * Binding OrderId to the envelope means a get envelope can't be replayed
+ * against a different order, and scoping by the verified agent prevents
+ * agents from peeking at competitors' orders.
  */
 export async function getLimitCloseHandler(c: Context) {
   if (!INTERNAL_TOKEN) return unconfigured(c);
@@ -345,9 +347,9 @@ export async function getLimitCloseHandler(c: Context) {
   if (!id || !/^\d{1,12}$/.test(id)) {
     return c.json({ error: "missing_or_invalid_id" }, 400);
   }
-  const agentPubkey = c.req.header("x-agent-pubkey") ?? "";
-  try { new PublicKey(agentPubkey); }
-  catch { return c.json({ error: "missing_or_invalid_agent_pubkey_header" }, 400); }
+  const verified = verifyAgentFromContext(c, "limit-close-get/v1", { expectedOrderId: id });
+  if (!verified.ok) return c.json({ error: verified.error }, verified.status as never);
+  const agentPubkey = verified.signer;
 
   const url = `${BOT_API}/api/v1/internal/agent/limit-close?id=${encodeURIComponent(id)}&agent=${encodeURIComponent(agentPubkey)}`;
   return forward(c, url, { method: "GET" });
@@ -361,8 +363,11 @@ export async function getLimitCloseHandler(c: Context) {
  * #148 which adds the shared modifyOrder() in arm-core.
  *
  * Body: { id, trigger_value_micro?, slippage_bps?, sell_destination?, expires_at? }
- * Headers: X-Agent-Pubkey (asserts identity; bot internal scopes
- *          modifications to source='agent_x402' + matching pubkey)
+ * Auth: signed Ed25519 envelope (headers X-Magpie-Env-Msg / -Sig /
+ *       -Signer, action "limit-close-modify/v1", OrderId == body.id).
+ *       The verified signer — never a self-asserted X-Agent-Pubkey
+ *       header — is forwarded as agent_pubkey; the bot internal scopes
+ *       modifications to source='agent_x402' + matching pubkey.
  *
  * What the agent can change without re-paying:
  *   - trigger_value_micro (move the price target)
@@ -381,10 +386,6 @@ export async function getLimitCloseHandler(c: Context) {
 export async function modifyLimitCloseHandler(c: Context) {
   if (!INTERNAL_TOKEN) return unconfigured(c);
 
-  const agentPubkey = c.req.header("x-agent-pubkey") ?? "";
-  try { new PublicKey(agentPubkey); }
-  catch { return c.json({ error: "missing_or_invalid_agent_pubkey_header" }, 400); }
-
   let body: unknown;
   try { body = await c.req.json(); }
   catch { return c.json({ error: "invalid_json" }, 400); }
@@ -394,6 +395,12 @@ export async function modifyLimitCloseHandler(c: Context) {
   if (!/^\d{1,12}$/.test(idRaw)) {
     return c.json({ error: "missing_or_invalid_id" }, 400);
   }
+
+  // Bind the envelope to this exact order id so a modify envelope can
+  // never be replayed against a different order.
+  const verified = verifyAgentFromContext(c, "limit-close-modify/v1", { expectedOrderId: idRaw });
+  if (!verified.ok) return c.json({ error: verified.error }, verified.status as never);
+  const agentPubkey = verified.signer;
 
   // Pass-through validation. The bot endpoint re-validates each field
   // canonically; we only catch the trivial type errors here so the
@@ -441,9 +448,9 @@ export async function modifyLimitCloseHandler(c: Context) {
  */
 export async function listLimitCloseHandler(c: Context) {
   if (!INTERNAL_TOKEN) return unconfigured(c);
-  const agentPubkey = c.req.header("x-agent-pubkey") ?? "";
-  try { new PublicKey(agentPubkey); }
-  catch { return c.json({ error: "missing_or_invalid_agent_pubkey_header" }, 400); }
+  const verified = verifyAgentFromContext(c, "limit-close-list/v1", {});
+  if (!verified.ok) return c.json({ error: verified.error }, verified.status as never);
+  const agentPubkey = verified.signer;
   const status = c.req.query("status") === "all" ? "all" : "armed";
 
   const url = `${BOT_API}/api/v1/internal/agent/limit-close/list?agent=${encodeURIComponent(agentPubkey)}&status=${status}`;
@@ -454,8 +461,10 @@ export async function listLimitCloseHandler(c: Context) {
  * GET /api/v1/agent/limit-close/delegations  — discover what this
  * agent is authorized for.
  *
- * Free. Scoped by X-Agent-Pubkey header. Returns every active
- * (user_wallet, bounds, usage) tuple the agent can operate against.
+ * Free. Scoped by the verified signer of a signed Ed25519 envelope
+ * (headers X-Magpie-Env-Msg / -Sig / -Signer, action
+ * "limit-close-delegations/v1"). Returns every active (user_wallet,
+ * bounds, usage) tuple the agent can operate against.
  *
  * Standard startup call for an agent: hit this once to see "what
  * surface am I working over today?", cache, then call POST /arm as
@@ -465,9 +474,9 @@ export async function listLimitCloseHandler(c: Context) {
  */
 export async function listDelegationsHandler(c: Context) {
   if (!INTERNAL_TOKEN) return unconfigured(c);
-  const agentPubkey = c.req.header("x-agent-pubkey") ?? "";
-  try { new PublicKey(agentPubkey); }
-  catch { return c.json({ error: "missing_or_invalid_agent_pubkey_header" }, 400); }
+  const verified = verifyAgentFromContext(c, "limit-close-delegations/v1", {});
+  if (!verified.ok) return c.json({ error: verified.error }, verified.status as never);
+  const agentPubkey = verified.signer;
 
   const url = `${BOT_API}/api/v1/internal/agent/limit-close/delegations?agent=${encodeURIComponent(agentPubkey)}`;
   return forward(c, url, { method: "GET" });
@@ -477,7 +486,9 @@ export async function listDelegationsHandler(c: Context) {
  * GET /api/v1/agent/limit-close/eligible-loans  — the agent's full
  * actionable surface.
  *
- * Free. Scoped by X-Agent-Pubkey header.
+ * Free. Scoped by the verified signer of a signed Ed25519 envelope
+ * (headers X-Magpie-Env-Msg / -Sig / -Signer, action
+ * "limit-close-eligible/v1").
  *
  * Returns every (user_wallet, loan) tuple where this agent has an
  * active delegation, with EXPLICIT eligibility for each loan:
@@ -504,9 +515,9 @@ export async function listDelegationsHandler(c: Context) {
  */
 export async function listEligibleLoansHandler(c: Context) {
   if (!INTERNAL_TOKEN) return unconfigured(c);
-  const agentPubkey = c.req.header("x-agent-pubkey") ?? "";
-  try { new PublicKey(agentPubkey); }
-  catch { return c.json({ error: "missing_or_invalid_agent_pubkey_header" }, 400); }
+  const verified = verifyAgentFromContext(c, "limit-close-eligible/v1", {});
+  if (!verified.ok) return c.json({ error: verified.error }, verified.status as never);
+  const agentPubkey = verified.signer;
 
   const url = `${BOT_API}/api/v1/internal/agent/limit-close/eligible-loans?agent=${encodeURIComponent(agentPubkey)}`;
   return forward(c, url, { method: "GET" });
@@ -515,8 +526,13 @@ export async function listEligibleLoansHandler(c: Context) {
 /**
  * DELETE /api/v1/agent/limit-close?id=<order_id>  — cancel an armed order.
  *
- * Free. The bot's UPDATE WHERE status='armed' makes a too-late cancel
- * a 409 no-op rather than corrupting an in-flight execution.
+ * Free. Auth: signed Ed25519 envelope (headers X-Magpie-Env-Msg /
+ * -Sig / -Signer, action "limit-close-cancel/v1", OrderId bound to the
+ * queried id). The verified signer — never a self-asserted
+ * X-Agent-Pubkey header — scopes the cancel, so an attacker can no
+ * longer disarm another agent's armed stop-loss. The bot's UPDATE WHERE
+ * status='armed' makes a too-late cancel a 409 no-op rather than
+ * corrupting an in-flight execution.
  */
 export async function cancelLimitCloseHandler(c: Context) {
   if (!INTERNAL_TOKEN) return unconfigured(c);
@@ -524,9 +540,9 @@ export async function cancelLimitCloseHandler(c: Context) {
   if (!id || !/^\d{1,12}$/.test(id)) {
     return c.json({ error: "missing_or_invalid_id" }, 400);
   }
-  const agentPubkey = c.req.header("x-agent-pubkey") ?? "";
-  try { new PublicKey(agentPubkey); }
-  catch { return c.json({ error: "missing_or_invalid_agent_pubkey_header" }, 400); }
+  const verified = verifyAgentFromContext(c, "limit-close-cancel/v1", { expectedOrderId: id });
+  if (!verified.ok) return c.json({ error: verified.error }, verified.status as never);
+  const agentPubkey = verified.signer;
 
   const url = `${BOT_API}/api/v1/internal/agent/limit-close?id=${encodeURIComponent(id)}&agent=${encodeURIComponent(agentPubkey)}`;
   return forward(c, url, { method: "DELETE" });

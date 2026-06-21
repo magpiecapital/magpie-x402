@@ -179,7 +179,7 @@ app.get("/", (c) =>
         "GET /api/v1/agent/intent?id=<intent_id> — 0.0005 SOL",
         "GET /api/v1/agent/intents?wallet=<pubkey> — 0.001 SOL",
         "POST /api/v1/agent/limit-close — 0.001 SOL (delegated: arm against ANOTHER wallet's loan via TG /agent-authorize grant)",
-        "GET /api/v1/agent/limit-close/eligible-loans — FREE (X-Agent-Pubkey; delegated loans + eligibility)",
+        "GET /api/v1/agent/limit-close/eligible-loans — FREE (signed Ed25519 envelope, action limit-close-eligible/v1; delegated loans + eligibility)",
       ],
       examples: "https://github.com/magpiecapital/magpie-x402/tree/main/examples",
       mcp_server: "https://github.com/magpiecapital/magpie-x402/tree/main/mcp",
@@ -963,9 +963,16 @@ if (PAY_TO) {
   // the 1% execution fee on fire is where the protocol earns the
   // real value (a fee on the proceeds, not on the arm).
   //
-  // Read / list / cancel are FREE so agents can manage their
-  // pipeline without being taxed. Scoping by X-Agent-Pubkey
-  // header keeps an agent from peeking at competitors' orders.
+  // Read / list / cancel / preflight / modify / delegations /
+  // eligible-loans are FREE so agents can manage their pipeline
+  // without being taxed. Each is scoped by the verified signer of a
+  // signed Ed25519 envelope (headers X-Magpie-Env-Msg / -Sig /
+  // -Signer, per-action magpie: limit-close-*/v1 binding, OrderId
+  // bound for order-scoped ops) — NOT a self-asserted X-Agent-Pubkey
+  // header. Agent pubkeys are public, so the prior header-trust let
+  // anyone disarm another agent's stop-loss; the signature now proves
+  // control of the key and keeps an agent from touching competitors'
+  // orders. (audit 2026-06-21, HIGH)
   app.post(
     "/api/v1/agent/limit-close",
     x402Required({

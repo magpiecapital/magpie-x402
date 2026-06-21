@@ -66,6 +66,41 @@ export interface SignedEnvelope {
 }
 
 /**
+ * The three transport headers the x402 service expects for envelope-
+ * authenticated DELEGATED management routes (preflight / get / list /
+ * delegations / eligible-loans / modify / cancel under
+ * /api/v1/agent/limit-close/*). Unlike the SELF surface — which carries the
+ * envelope in the JSON body — the delegated management routes read the
+ * envelope from headers so GET/DELETE requests (which have no body) can be
+ * authenticated. The service Ed25519-verifies the signature, binds
+ * From==signer + the action (+ OrderId for order-scoped ops), enforces a
+ * 5-minute freshness window, and forwards the VERIFIED signer as the agent
+ * identity — it no longer trusts any self-asserted X-Agent-Pubkey header.
+ */
+export function envelopeHeaders(env: SignedEnvelope): Record<string, string> {
+  return {
+    "X-Magpie-Env-Msg": env.signedMessageBase64,
+    "X-Magpie-Env-Sig": env.signatureBase58,
+    "X-Magpie-Env-Signer": env.signerPubkey,
+  };
+}
+
+/**
+ * Build + sign a management envelope and render it directly as the three
+ * X-Magpie-Env-* headers. `orderId` is included only for order-scoped
+ * actions (get / modify / cancel) so the signature binds the target order.
+ */
+export function buildManagementHeaders(
+  keypair: Keypair,
+  action: string,
+  orderId?: string,
+): Record<string, string> {
+  const fields: Record<string, string | undefined> = {};
+  if (orderId !== undefined) fields.OrderId = orderId;
+  return envelopeHeaders(buildSignedEnvelope(keypair, action, fields));
+}
+
+/**
  * Build + sign an envelope. `From`, `Nonce`, and `IssuedAt` are added
  * automatically (unless you override them) — the bot requires all three and
  * enforces a 5-minute freshness window on IssuedAt + nonce-uniqueness.
