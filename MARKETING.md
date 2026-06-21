@@ -6,15 +6,22 @@ This is a living doc. PRs welcome.
 
 ---
 
+## The one-liner
+
+**Magpie is the first lending protocol an autonomous agent can drive end-to-end with no signup, no API key, and no custody** — it pays per call via x402, we hand back an *unsigned* transaction, and the agent signs and submits it itself (we never hold keys). Borrow against a memecoin, arm an in-vault take-profit / stop-loss on the loan, let it fire, repay — the whole leveraged-position lifecycle, agent-driven.
+
+> Every other x402 service on Solana is read-only token data or micro-credit to pay an API bill. Magpie is the only one gating the full **write-side leveraged-borrow lifecycle**. That combination — borrow + agent-set in-vault exit + zero-custody + x402-permissionless — is the defensible, currently-unclaimed category: **agent-native leverage.**
+
 ## What we're actually selling
 
-Five things that AI agents and other Solana protocols cannot get anywhere else:
+Three strategies, mapped to three on-chain programs, plus the supporting surface:
 
-1. **Magpie credit scores + cryptographically-signed credit attestations.** Wallet-level repayment-history scoring on Solana, portable as ed25519-signed payloads that other protocols can verify without trusting our API.
-2. **A real lending protocol's read surface, on-chain-direct.** Pool state, loan state, borrower history — no DB intermediary, no rate-limited public RPC, all responses CDN-cacheable.
-3. **Paid agent-callable borrow / repay / extend / topup / partial-repay transaction builders.** The agent never gets our keys; we never get the agent's. Pure handoff: agent pays via x402, we build the unsigned tx, agent signs and submits.
-4. **Conditional borrow intents — "limit orders for borrows."** The wedge that makes Magpie the first agent-native lending protocol on Solana. Single x402 payment buys watcher slot + final tx build.
-5. **Liquidation-bot data feeds.** Past-due active loans, sorted by urgency, free + 8s cache. The on-chain liquidate ix is permissionless; we surface the discovery side so liquidation racing actually happens.
+1. **Permissionless borrow against MEMECOINS [V1].** Agent pays per call, gets an unsigned borrow tx it signs itself.
+2. **Permissionless borrow against RWAs / tokenized stocks [V3].** Borrow SOL against tokenized equity without a taxable sale. **Launch-gated** — the x402 layer accepts it; message as "on the V3 equity-track launch," never present-tense, until the program mints these loans.
+3. **Agent-managed in-vault EXIT ORDERS [V4].** The differentiator. An agent opens a loan with `has_exit_arming=true` (routes to V4), then arms its own take-profit / stop-loss via a signed envelope — no Telegram, no delegation, no custodial keypair. When an exit fires, SOL accrues in a per-loan `sol_proceeds_vault` PDA and the loan stays Active; the only path to a wallet is a borrower-signed repay. **No other Solana lending tool exposes agent-set TP/SL on a loan.** (Scope every in-vault claim to V4 explicitly.)
+4. **The full no-custody lifecycle as one product:** borrow → arm auto-exit → fire in-vault → repay, agent signs every tx. A full RCE on our servers cannot drain a user.
+5. **Read surface, on-chain-direct, multi-version:** pool/loan/wallet/liquidatable state across V1/V3/V4, each tagged with `program_version`. Free, CDN-cacheable — the friction-zero front door that converts agents to the paid write side.
+6. **Portable ed25519-signed credit attestations.** Wallet-level repayment-history scoring other protocols can verify without trusting our API. (Secondary pillar — keep until a partner consumes it; don't headline an unverified claim.)
 
 Everything else is plumbing.
 

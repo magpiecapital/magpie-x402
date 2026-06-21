@@ -36,9 +36,11 @@
  */
 import { Connection, Keypair, PublicKey, Transaction } from "@solana/web3.js";
 import { freeGet, paidCall, X402Context, X402Error } from "./x402.js";
+import { buildSignedEnvelope } from "./envelope.js";
 
 export { X402Error };
 export { verifyWebhookSignature, IntentMatchedPayload } from "./webhooks.js";
+export { buildSignedEnvelope, SignedEnvelope } from "./envelope.js";
 
 const DEFAULT_BASE_URL = "https://x402.magpie.capital";
 const DEFAULT_RPC_URL = "https://api.mainnet-beta.solana.com";
@@ -74,6 +76,39 @@ export interface LoanInfo {
   borrowed_lamports: string;
   due_at_unix: number;
   status: "active" | "repaid" | "liquidated";
+}
+
+/** A loan decoded across V1/V3/V4 — tagged with its program version. */
+export interface AgentLoan {
+  programVersion: "v1" | "v3" | "v4";
+  programId: string;
+  loanPda: string;
+  loanId: string;
+  borrower: string;
+  collateralMint: string;
+  collateralAmount: string;
+  loanAmountLamports: string;
+  repayAmountLamports: string;
+  ltvBps: number;
+  durationDays: number;
+  startTimestampUnix: number;
+  dueTimestampUnix: number;
+  status: "active" | "repaid" | "liquidated" | "unknown";
+  /** 'memecoin' | 'rwa' — undefined on V1. */
+  category?: "memecoin" | "rwa";
+  /** In-vault auto-sell state — present only on V4 loans. */
+  v4?: { currentCollateralAmount: string; solProceedsLamports: string; autoSellsFired: number };
+  /** True only for V4 loans (the sole version that accepts exit orders). */
+  exitsSupported: boolean;
+}
+
+/** Per-version error map returned when a multi-version read fails-soft. */
+export type PartialVersions = Partial<Record<"v1" | "v3" | "v4", "error">>;
+
+export interface ExitOrderResult {
+  /** Raw bot response (order id, status, etc.). */
+  order: Record<string, unknown>;
+  feesPaidLamports: bigint;
 }
 
 export interface LpPosition {
@@ -190,16 +225,41 @@ export class MagpieAgent {
     return freeGet(this.ctx, "/api/v1/pool");
   }
 
-  /** Fetch a single loan by its u64 ID. Free. */
-  async loan(loanId: string | bigint): Promise<LoanInfo> {
-    return freeGet(this.ctx, `/api/v1/loan/${encodeURIComponent(String(loanId))}`);
+  /** All three strategy pools (V1/V3/V4) in one call. Free. */
+  async pools(): Promise<{ pools: Record<string, PoolState>; partial: PartialVersions }> {
+    return freeGet(this.ctx, "/api/v1/pools");
   }
 
-  /** Every loan opened by a wallet — active, repaid, liquidated. Free. */
+  /**
+   * Fetch a single loan by its PDA — unambiguous, routed to V1/V3/V4 from the
+   * on-chain owner. Returns program_version + (V4) exit state + exits_supported.
+   * Free.
+   */
+  async loanByPda(
+    loanPda: PublicKey | string,
+  ): Promise<AgentLoan & { exits_supported: boolean; exit_ineligibility_reason: string | null }> {
+    const p = typeof loanPda === "string" ? loanPda : loanPda.toBase58();
+    return freeGet(this.ctx, `/api/v1/loan/by-pda/${encodeURIComponent(p)}`);
+  }
+
+  /**
+   * Find loans by borrower + loan_id across V1/V3/V4. Returns a LIST — a
+   * borrower can hold the same numeric loan_id in more than one program, so
+   * borrower is required to derive the PDA. Free.
+   */
+  async loan(
+    loanId: string | bigint,
+    borrower: PublicKey | string,
+  ): Promise<{ count: number; partial: PartialVersions; loans: AgentLoan[] }> {
+    const b = typeof borrower === "string" ? borrower : borrower.toBase58();
+    return freeGet(this.ctx, `/api/v1/loan/${encodeURIComponent(String(loanId))}`, { borrower: b });
+  }
+
+  /** Every loan a wallet holds across V1/V3/V4, tagged with program_version. Free. */
   async walletLoans(
     wallet: PublicKey | string,
     opts: { status?: "active" | "repaid" | "liquidated" } = {},
-  ): Promise<{ loans: LoanInfo[] }> {
+  ): Promise<{ count: number; by_version: Record<string, number>; partial: PartialVersions; loans: AgentLoan[] }> {
     const w = typeof wallet === "string" ? wallet : wallet.toBase58();
     const query: Record<string, string> = {};
     if (opts.status) query.status = opts.status;
@@ -234,14 +294,23 @@ export class MagpieAgent {
     return freeGet(this.ctx, "/api/v1/collateral/eligible");
   }
 
-  /** Past-due active loans — the canonical liquidation-bot feed. Free. */
-  async liquidatable(opts: { withinSeconds?: number; limit?: number } = {}): Promise<{
-    liquidatable: Array<LoanInfo & { seconds_past_due: number }>;
-    total: number;
+  /**
+   * Past-due active loans across V1/V3 (and V4 if includeV4) — the canonical
+   * liquidation-bot feed, each tagged with program_version. V4 loans auto-sell
+   * in-vault so they're excluded unless you opt in. Free.
+   */
+  async liquidatable(
+    opts: { withinSeconds?: number; limit?: number; includeV4?: boolean } = {},
+  ): Promise<{
+    eligible_count: number;
+    returned_count: number;
+    partial: PartialVersions;
+    loans: Array<AgentLoan & { secondsPastDue: number }>;
   }> {
     const query: Record<string, string> = {};
     if (opts.withinSeconds !== undefined) query.within_seconds = String(opts.withinSeconds);
     if (opts.limit !== undefined) query.limit = String(opts.limit);
+    if (opts.includeV4) query.include_v4 = "true";
     return freeGet(this.ctx, "/api/v1/markets/liquidatable", query);
   }
 
@@ -299,6 +368,11 @@ export class MagpieAgent {
     collateralMint: PublicKey | string;
     collateralAmount: bigint | string;
     tier: TierName;
+    /**
+     * Open on the V4 in-vault program so you can arm exit orders (TP/SL) on
+     * this loan afterward via armExit(). Default false (V1 memecoin / V3 RWA).
+     */
+    hasExitArming?: boolean;
   }): Promise<BorrowResult> {
     const keypair = this.requireKeypair("borrow");
     const mint =
@@ -315,6 +389,7 @@ export class MagpieAgent {
         collateral_mint: mint,
         collateral_amount: String(opts.collateralAmount),
         tier: TIER_INDEX[opts.tier],
+        has_exit_arming: opts.hasExitArming === true,
       },
     });
 
@@ -520,6 +595,110 @@ export class MagpieAgent {
     await paidCall(this.ctx, "DELETE", "/api/v1/agent/intent", {
       query: { id: intentId },
     });
+  }
+
+  // ── Exit orders — arm in-vault TP/SL on your OWN V4 loan ────────────
+  //
+  // These require a V4 loan (open one with borrow({ ..., hasExitArming: true })).
+  // The SDK signs an Ed25519 envelope with your keypair and the x402 service
+  // forwards it to the bot, which enforces ownership + V4-only. Self-custody:
+  // no Telegram, no delegation, no custodial key.
+
+  /**
+   * Arm an in-vault take-profit / stop-loss on your own V4 loan. Paid: 0.001 SOL.
+   *
+   * Supply exactly one trigger: `target` ("2x" for TP, "0.7x" for SL),
+   * `priceUsd`, `mcUsd` ("5M"/"1.2B"), or `trailingBps` (SL only). `direction`
+   * defaults to "above" (take-profit); use "below" for a stop-loss.
+   */
+  async armExit(opts: {
+    loanId: string | bigint;
+    direction?: "above" | "below";
+    target?: string;
+    priceUsd?: number | string;
+    mcUsd?: string;
+    trailingBps?: number;
+    slippageBps?: number;
+    dest?: "sol" | "usdc";
+    slice?: string;
+  }): Promise<ExitOrderResult> {
+    const keypair = this.requireKeypair("armExit");
+    if (
+      opts.target === undefined &&
+      opts.priceUsd === undefined &&
+      opts.mcUsd === undefined &&
+      opts.trailingBps === undefined
+    ) {
+      throw new Error("armExit: supply one of target, priceUsd, mcUsd, or trailingBps.");
+    }
+    const env = buildSignedEnvelope(keypair, "limit-close-arm/v1", {
+      LoanId: String(opts.loanId),
+      Direction: opts.direction,
+      Target: opts.target,
+      Price: opts.priceUsd,
+      MC: opts.mcUsd,
+      Trailing: opts.trailingBps,
+      Slippage: opts.slippageBps,
+      Slice: opts.slice,
+      Dest: opts.dest,
+    });
+    const r = await paidCall<Record<string, unknown>>(
+      this.ctx,
+      "POST",
+      "/api/v1/agent/self-limit-close/arm",
+      { body: env },
+    );
+    return { order: r.data, feesPaidLamports: r.paid?.amountLamports ?? 0n };
+  }
+
+  /** Modify an armed exit on your own loan (no re-pay). Free. */
+  async modifyExit(opts: {
+    orderId: string;
+    priceUsd?: number | string;
+    mcUsd?: string;
+    target?: string;
+    slippageBps?: number;
+    dest?: "sol" | "usdc";
+    trailingBps?: number;
+  }): Promise<ExitOrderResult> {
+    const keypair = this.requireKeypair("modifyExit");
+    const env = buildSignedEnvelope(keypair, "limit-close-modify/v1", {
+      OrderId: opts.orderId,
+      Price: opts.priceUsd,
+      MC: opts.mcUsd,
+      Target: opts.target,
+      Slippage: opts.slippageBps,
+      Dest: opts.dest,
+      Trailing: opts.trailingBps,
+    });
+    const r = await paidCall<Record<string, unknown>>(
+      this.ctx,
+      "POST",
+      "/api/v1/agent/self-limit-close/modify",
+      { body: env },
+    );
+    return { order: r.data, feesPaidLamports: r.paid?.amountLamports ?? 0n };
+  }
+
+  /** Cancel an armed exit on your own loan. Free. */
+  async cancelExit(orderId: string): Promise<ExitOrderResult> {
+    const keypair = this.requireKeypair("cancelExit");
+    const env = buildSignedEnvelope(keypair, "limit-close-cancel/v1", { OrderId: orderId });
+    const r = await paidCall<Record<string, unknown>>(
+      this.ctx,
+      "POST",
+      "/api/v1/agent/self-limit-close/cancel",
+      { body: env },
+    );
+    return { order: r.data, feesPaidLamports: r.paid?.amountLamports ?? 0n };
+  }
+
+  /** List your armed exit orders. Free. */
+  async listExits(
+    wallet: PublicKey | string = this.requireSelf(),
+  ): Promise<{ orders: unknown[] }> {
+    const w = typeof wallet === "string" ? wallet : wallet.toBase58();
+    return freeGet(this.ctx, "/api/v1/agent/self-limit-close/list", { wallet: w });
   }
 
   // ── Internal helpers ───────────────────────────────────────────────

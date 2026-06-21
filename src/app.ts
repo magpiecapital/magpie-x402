@@ -14,8 +14,8 @@ import { bodyLimit } from "hono/body-limit";
 import { x402Required } from "./middleware/x402.js";
 import { rateLimit } from "./middleware/rate-limit.js";
 import { creditScoreHandler } from "./routes/credit-score.js";
-import { poolHandler } from "./routes/pool.js";
-import { loanHandler } from "./routes/loan.js";
+import { poolHandler, poolsAggregateHandler } from "./routes/pool.js";
+import { loanHandler, loanByPdaHandler } from "./routes/loan.js";
 import { walletLoansHandler } from "./routes/wallet-loans.js";
 import { simulateBorrowHandler } from "./routes/simulate-borrow.js";
 import { buildBorrowHandler } from "./routes/build-borrow.js";
@@ -51,6 +51,13 @@ import {
   cancelLimitCloseHandler,
   listDelegationsHandler,
 } from "./routes/agent-limit-close.js";
+import {
+  armSelfLimitCloseHandler,
+  armBatchSelfLimitCloseHandler,
+  modifySelfLimitCloseHandler,
+  cancelSelfLimitCloseHandler,
+  listSelfLimitCloseHandler,
+} from "./routes/self-limit-close.js";
 import { tokenRiskHandler } from "./routes/token-risk.js";
 import { TIERS } from "./lib/tiers.js";
 
@@ -163,6 +170,11 @@ app.get("/health", (c) => c.json({ ok: true, ts: new Date().toISOString() }));
 // decodes the live LendingPool Anchor account from the canonical
 // program ID. Cached 15s in-process for speed.
 app.get("/api/v1/pool", poolHandler);
+app.get("/api/v1/pools", poolsAggregateHandler);
+// Multi-version loan reads (V1 memecoin / V3 RWA / V4 exit). by-pda is the
+// unambiguous single-loan form; the :loanId form requires ?borrower= because
+// loan PDAs are seeded by borrower and loan_id is per-program.
+app.get("/api/v1/loan/by-pda/:loanPda", loanByPdaHandler);
 app.get("/api/v1/loan/:loanId", loanHandler);
 app.get("/api/v1/wallet/:wallet/loans", walletLoansHandler);
 app.get("/api/v1/simulate-borrow", simulateBorrowHandler);
@@ -216,31 +228,47 @@ app.get("/openapi.json", (c) => c.json({
   paths: {
     "/api/v1/pool": {
       get: {
-        summary: "Live on-chain LendingPool state",
-        description: "Reads the Magpie LendingPool Anchor account directly from the program. 15s in-process cache.",
-        responses: { "200": { description: "Pool state", content: { "application/json": {} } } },
+        summary: "Live on-chain LendingPool state (one strategy)",
+        description: "Reads the LendingPool Anchor account for one program version. ?version=v1 (memecoin, default) | v3 (RWA) | v4 (exit-order). 15s cache.",
+        parameters: [{ name: "version", in: "query", required: false, schema: { type: "string", enum: ["v1", "v3", "v4"], default: "v1" } }],
+        responses: { "200": { description: "Pool state (with program_version)" } },
+      },
+    },
+    "/api/v1/pools": {
+      get: {
+        summary: "All three strategy pools in one call",
+        description: "V1 + V3 + V4 LendingPool state together. Each version is fetched independently; a failed version appears in `partial` and never blanks the others (lane separation).",
+        responses: { "200": { description: "{ pools: { v1, v3, v4 }, partial }" } },
+      },
+    },
+    "/api/v1/loan/by-pda/{loanPda}": {
+      get: {
+        summary: "Fetch a single loan by its PDA (unambiguous, any version)",
+        description: "Decodes the Loan account, routing to V1/V3/V4 purely from the account owner. Returns program_version, category, and (V4) in-vault exit state + exits_supported.",
+        parameters: [{ name: "loanPda", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Loan (with program_version + exits_supported)" }, "404": { description: "Not found" } },
       },
     },
     "/api/v1/loan/{loanId}": {
       get: {
-        summary: "Fetch a single loan by ID",
-        description: "Reads the Loan PDA from the program for the given u64 loan_id.",
-        parameters: [{ name: "loanId", in: "path", required: true, schema: { type: "string", pattern: "^[0-9]+$" } }],
-        responses: {
-          "200": { description: "Loan state" },
-          "404": { description: "Loan not found" },
-        },
+        summary: "Find loans by borrower + loan_id (across versions)",
+        description: "Requires ?borrower= because loan PDAs are seeded by borrower and each program has its own loan_id sequence. Returns a LIST (a borrower can hold the same loan_id in more than one program). For a single unambiguous loan use /api/v1/loan/by-pda/{loanPda}.",
+        parameters: [
+          { name: "loanId", in: "path", required: true, schema: { type: "string", pattern: "^[0-9]+$" } },
+          { name: "borrower", in: "query", required: true, schema: { type: "string" } },
+        ],
+        responses: { "200": { description: "{ count, loans[] } each tagged with program_version" }, "404": { description: "Not found" } },
       },
     },
     "/api/v1/wallet/{wallet}/loans": {
       get: {
-        summary: "All loans owned by a wallet",
-        description: "Single-roundtrip getProgramAccounts + memcmp filter on the borrower offset. Optional ?status=active|repaid|liquidated query filter. 8s cache.",
+        summary: "All loans owned by a wallet, across V1/V3/V4",
+        description: "Fans getProgramAccounts (borrower memcmp @offset 16) across all three lending programs and decodes each through the pool-separation-safe guard. Each loan is tagged with program_version + category + (V4) exit state. A failed version appears in `partial` and never blanks the rest. Optional ?status=active|repaid|liquidated. 8s cache.",
         parameters: [
           { name: "wallet", in: "path", required: true, schema: { type: "string" } },
           { name: "status", in: "query", required: false, schema: { type: "string", enum: ["active", "repaid", "liquidated"] } },
         ],
-        responses: { "200": { description: "Loan list (newest-first)" } },
+        responses: { "200": { description: "{ count, by_version, partial, loans[] } newest-first" } },
       },
     },
     "/api/v1/tiers": {
@@ -319,12 +347,13 @@ app.get("/openapi.json", (c) => c.json({
     "/api/v1/markets/liquidatable": {
       get: {
         summary: "Active loans currently liquidatable (past due)",
-        description: "Sorted most-past-due-first. Optional within_seconds query for pre-positioning. Free — the read surface for liquidation-bot agents.",
+        description: "Multi-version (V1 memecoin + V3 RWA by default). Sorted most-past-due-first; each loan tagged with program_version. V4 (exit-order) loans auto-sell in-vault and are EXCLUDED by default; pass ?include_v4=true to add them. Optional within_seconds for pre-positioning. Free — the read surface for liquidation-bot agents.",
         parameters: [
           { name: "within_seconds", in: "query", required: false, schema: { type: "integer", minimum: 0, maximum: 604800, default: 0 } },
           { name: "limit", in: "query", required: false, schema: { type: "integer", minimum: 1, maximum: 500, default: 100 } },
+          { name: "include_v4", in: "query", required: false, schema: { type: "string", enum: ["true", "false"], default: "false" } },
         ],
-        responses: { "200": { description: "Liquidatable loan list with per-loan seconds_past_due" } },
+        responses: { "200": { description: "Liquidatable loan list with per-loan program_version + seconds_past_due" } },
       },
     },
     "/api/v1/agent/activity": {
@@ -405,6 +434,60 @@ app.get("/openapi.json", (c) => c.json({
         },
       },
     },
+    "/api/v1/agent/build-borrow": {
+      post: {
+        summary: "Build an unsigned borrow tx (paid 0.005 SOL)",
+        description: "Body: { borrower_wallet, collateral_mint, collateral_amount (u64 string), tier (0|1|2), has_exit_arming? }. The borrow is routed by the bot: no-exits+memecoin → V1, no-exits+RWA → V3, has_exit_arming=true → V4 (so the agent can then arm in-vault exit orders on the loan). x402 payer must equal borrower_wallet. The agent signs + submits via the lender-cosign endpoint.",
+        responses: {
+          "200": { description: "partial_signed_tx_b64 + summary (program_id, program_version, loan_id, loan_pda)" },
+          "400": { description: "Validation error (classified for known V4 rejections)" },
+          "402": { description: "Payment Required" },
+          "403": { description: "payer != borrower_wallet" },
+        },
+      },
+    },
+    "/api/v1/agent/self-limit-close/arm": {
+      post: {
+        summary: "Arm an in-vault exit order on YOUR OWN V4 loan (paid 0.001 SOL)",
+        description: "Self-custody agents manage exits on their own loans — no Telegram, no delegation, no custodial keypair. Body is an Ed25519-signed envelope { signedMessageBase64, signatureBase58, signerPubkey } whose signed text carries magpie: limit-close-arm/v1, From (==signer), LoanId, Direction (above=TP / below=SL), the trigger, Nonce, IssuedAt. x402 binds payer==signer; the bot re-verifies the signature, enforces ownership, and enforces exits-are-V4-only. SDK helper builds + signs the envelope for you.",
+        responses: {
+          "200": { description: "Order armed" },
+          "400": { description: "Bad envelope / not a V4 loan (exits_require_v4_loan)" },
+          "402": { description: "Payment Required" },
+          "403": { description: "payer != envelope signer" },
+          "409": { description: "nonce_already_used — the original arm likely succeeded (idempotent)" },
+        },
+      },
+    },
+    "/api/v1/agent/self-limit-close/arm-batch": {
+      post: {
+        summary: "Arm a ladder of exit orders on your own V4 loan (paid 0.001 SOL)",
+        description: "Same signed-envelope auth as /arm (magpie: limit-close-arm-batch/v1). Arms multiple take-profit / stop-loss steps in one call.",
+        responses: { "200": { description: "Batch armed" }, "402": { description: "Payment Required" }, "403": { description: "payer != signer" } },
+      },
+    },
+    "/api/v1/agent/self-limit-close/modify": {
+      post: {
+        summary: "Modify an armed exit on your own loan (free)",
+        description: "Signed envelope (magpie: limit-close-modify/v1, OrderId). Change trigger / slippage / destination / expiry without re-paying — the signature authorizes.",
+        responses: { "200": { description: "Modified" }, "409": { description: "Already firing / not modifiable" } },
+      },
+    },
+    "/api/v1/agent/self-limit-close/cancel": {
+      post: {
+        summary: "Cancel an armed exit on your own loan (free)",
+        description: "Signed envelope (magpie: limit-close-cancel/v1, OrderId). A too-late cancel is a 409 no-op (the engine flipped to firing).",
+        responses: { "200": { description: "Cancelled" }, "409": { description: "Not cancellable" } },
+      },
+    },
+    "/api/v1/agent/self-limit-close/list": {
+      get: {
+        summary: "List your armed exit orders (free)",
+        description: "All armed exit orders for a wallet. Public read of the same data the owner sees in the UI.",
+        parameters: [{ name: "wallet", in: "query", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Armed order list" } },
+      },
+    },
   },
 }));
 
@@ -416,10 +499,10 @@ app.get("/.well-known/x402.json", (c) =>
       {
         method: "GET",
         path: "/api/v1/pool",
-        params: {},
+        params: { version: "optional v1|v3|v4 (default v1) — which strategy's pool" },
         priceLamports: "0",
         priceLabel: "free (15s server cache)",
-        description: "Live on-chain LendingPool state — totalDeposits, totalBorrowed, totalLoansIssued, totalLiquidations, totalFeesEarned. Decoded directly from the Magpie program account.",
+        description: "Live on-chain LendingPool state for one strategy version — totalDeposits, totalBorrowed, totalLoansIssued, totalLiquidations, totalFeesEarned. Use /api/v1/pools for all three at once.",
       },
       {
         method: "GET",
@@ -484,10 +567,11 @@ app.get("/.well-known/x402.json", (c) =>
         params: {
           within_seconds: "optional int — also include loans due within N seconds (0..604800), default 0",
           limit: "optional int — max returned entries (1..500), default 100",
+          include_v4: "optional 'true' — include V4 exit-order loans (excluded by default; they auto-sell in-vault)",
         },
         priceLamports: "0",
         priceLabel: "free (8s cache)",
-        description: "Active loans at or past their on-chain due timestamp — the canonical liquidation-bot data feed. The liquidate ix is permissionless on-chain; any wallet can call it and receive the liquidator reward.",
+        description: "Active V1/V3 loans at or past their on-chain due timestamp — the canonical liquidation-bot data feed, each tagged with program_version. The liquidate ix is permissionless on-chain; any wallet can call it and receive the liquidator reward.",
       },
       {
         method: "GET",
@@ -561,6 +645,64 @@ app.get("/.well-known/x402.json", (c) =>
         priceLamports: "2000000",
         priceLabel: "0.002 SOL per build",
         description: "Build an unsigned LP-withdraw tx for the given shares. Server refuses chunks larger than max_safe_shares (avoids the v1 program's u64 overflow on huge positions). For positions above one safe chunk, withdraw in multiple calls.",
+      },
+      {
+        method: "GET",
+        path: "/api/v1/pools",
+        params: {},
+        priceLamports: "0",
+        priceLabel: "free (15s cache)",
+        description: "All three strategy pools (V1 memecoin / V3 RWA / V4 exit-order) in one call, fail-soft per version.",
+      },
+      {
+        method: "GET",
+        path: "/api/v1/loan/by-pda/{loanPda}",
+        params: { loanPda: "Solana pubkey (base58) of the loan PDA" },
+        priceLamports: "0",
+        priceLabel: "free (10s cache)",
+        description: "Single loan by PDA, routed to V1/V3/V4 from the account owner. Returns program_version, category, V4 in-vault exit state, and exits_supported.",
+      },
+      {
+        method: "GET",
+        path: "/api/v1/wallet/{wallet}/loans",
+        params: { wallet: "Solana pubkey (base58)", status: "optional active|repaid|liquidated" },
+        priceLamports: "0",
+        priceLabel: "free (8s cache)",
+        description: "Every loan a wallet holds across V1/V3/V4, each tagged with program_version + category + (V4) exit state. Fail-soft per version (a failed version appears in `partial`).",
+      },
+      {
+        method: "POST",
+        path: "/api/v1/agent/build-borrow",
+        params: {
+          borrower_wallet: "Solana pubkey",
+          collateral_mint: "Solana mint",
+          collateral_amount: "u64 string",
+          tier: "0|1|2",
+          has_exit_arming: "optional boolean — true routes the borrow to V4 so exit orders can be armed on the loan",
+        },
+        priceLamports: "5000000",
+        priceLabel: "0.005 SOL per build",
+        description: "Build an unsigned borrow tx. Routed by the bot: no-exits+memecoin → V1, no-exits+RWA → V3, has_exit_arming → V4. x402 payer must equal borrower_wallet.",
+      },
+      {
+        method: "POST",
+        path: "/api/v1/agent/self-limit-close/arm",
+        params: {
+          signedMessageBase64: "base64 of the Ed25519-signed envelope (magpie: limit-close-arm/v1; From==signer; LoanId; Direction above=TP/below=SL; trigger; Nonce; IssuedAt)",
+          signatureBase58: "base58 ed25519 signature",
+          signerPubkey: "Solana pubkey (== loan owner == x402 payer)",
+        },
+        priceLamports: "1000000",
+        priceLabel: "0.001 SOL per arm",
+        description: "Arm an in-vault take-profit / stop-loss exit on YOUR OWN V4 loan. Self-custody; no Telegram, no delegation, no custodial keypair. x402 binds payer==signer; the bot enforces ownership + exits-are-V4-only. Free /modify, /cancel, /list companions.",
+      },
+      {
+        method: "GET",
+        path: "/api/v1/agent/self-limit-close/list",
+        params: { wallet: "Solana pubkey (base58)" },
+        priceLamports: "0",
+        priceLabel: "free",
+        description: "List the armed in-vault exit orders for a wallet.",
       },
     ],
     contact: "https://github.com/magpiecapital/magpie-x402/issues",
@@ -814,6 +956,40 @@ if (PAY_TO) {
   app.get("/api/v1/agent/limit-close/delegations", listDelegationsHandler);
   app.get("/api/v1/agent/limit-close/eligible-loans", listEligibleLoansHandler);
   app.delete("/api/v1/agent/limit-close", cancelLimitCloseHandler);
+
+  // ── Self-owned exit orders (loan OWNER arms exits on its OWN V4 loan) ──
+  // The caller IS the borrower: a self-custody agent that opened a V4 loan
+  // (build-borrow with has_exit_arming=true) manages its own in-vault auto-
+  // sell exits via an Ed25519-signed envelope — no TG, no delegation, no
+  // custodial keypair. The signature authorizes; x402 binds payer==signer on
+  // the paid arms and forwards to the bot's signature-gated site surface.
+  // V4-only + ownership are enforced bot-side (V4_EXIT_EXCLUSIVE_ENFORCE).
+  app.post(
+    "/api/v1/agent/self-limit-close/arm",
+    x402Required({
+      payTo: PAY_TO,
+      amountLamports: 1_000_000n, // 0.001 SOL per arm (matches delegation arm)
+      label: "Magpie self limit-close arm",
+      docsUrl: "https://github.com/magpiecapital/magpie-x402#self-limit-close",
+    }),
+    armSelfLimitCloseHandler,
+  );
+  app.post(
+    "/api/v1/agent/self-limit-close/arm-batch",
+    x402Required({
+      payTo: PAY_TO,
+      amountLamports: 1_000_000n, // 0.001 SOL per batch arm
+      label: "Magpie self limit-close arm-batch",
+      docsUrl: "https://github.com/magpiecapital/magpie-x402#self-limit-close",
+    }),
+    armBatchSelfLimitCloseHandler,
+  );
+  // Free management — the agent already paid to arm; steering its own
+  // orders (signature-authorized) isn't taxed.
+  app.post("/api/v1/agent/self-limit-close/modify", modifySelfLimitCloseHandler);
+  app.delete("/api/v1/agent/self-limit-close/cancel", cancelSelfLimitCloseHandler);
+  app.post("/api/v1/agent/self-limit-close/cancel", cancelSelfLimitCloseHandler);
+  app.get("/api/v1/agent/self-limit-close/list", listSelfLimitCloseHandler);
 } else {
   // Surfaces a clear "service misconfigured" error instead of a silent
   // 404 when MAGPIE_PAY_TO isn't set in the environment.

@@ -1,5 +1,6 @@
 import type { Context } from "hono";
 import { PublicKey } from "@solana/web3.js";
+import { enforcePayerMatchesWallet } from "../lib/payer-bind.js";
 
 /**
  * POST /api/v1/agent/build-liquidate
@@ -56,6 +57,12 @@ export async function buildLiquidateHandler(c: Context) {
     return c.json({ error: "invalid_loan_pda" }, 400);
   }
 
+  // Security gate: the x402 payer must equal the keeper — you build a
+  // liquidate tx naming YOUR wallet as the bounty recipient. Stops a paying
+  // caller from constructing liquidations crediting an arbitrary keeper.
+  const mismatch = enforcePayerMatchesWallet(c, keeper);
+  if (mismatch) return mismatch;
+
   let res: Response;
   try {
     res = await fetch(`${SITE_API}/api/v1/lp/build-liquidate`, {
@@ -76,7 +83,8 @@ export async function buildLiquidateHandler(c: Context) {
   try {
     data = JSON.parse(text);
   } catch {
-    data = { error: "site_returned_non_json", raw: text.slice(0, 500) };
+    console.warn(`[agent-liquidate] non-JSON from site (status ${res.status}):`, text.slice(0, 300));
+    data = { error: "site_returned_non_json", status: res.status };
   }
   return c.json(data as Record<string, unknown>, res.status as never);
 }

@@ -36,11 +36,24 @@ import { enforcePayerMatchesWallet } from "../lib/payer-bind.js";
  *     tier:               number  (0=express 30% LTV / 2d / 3% fee,
  *                                  1=quick   25% LTV / 3d / 2% fee,
  *                                  2=standard 20% LTV / 7d / 1.5% fee)
+ *     has_exit_arming?:   boolean (optional, default false) — when true, the
+ *                                  loan is opened on the V4 in-vault program
+ *                                  so the agent can arm auto-sell exit orders
+ *                                  on it afterward (see /api/v1/agent/self-
+ *                                  limit-close/*). The bot's chooseProgramId
+ *                                  routes the borrow: no-exits+memecoin -> V1,
+ *                                  no-exits+RWA -> V3, has_exit_arming -> V4.
  *   }
  *
  * Response:
- *   200 OK { partial_signed_tx_b64, summary, next_step }
+ *   200 OK { partial_signed_tx_b64, summary, next_step }  (summary carries
+ *           program_id + program_version + loan_id + loan_pda)
  *   400/403/500 with { error, detail?, reason? } on validation / gate / build failure
+ *
+ * Lane separation: has_exit_arming is a pure ROUTING HINT forwarded to the
+ * bot. This handler performs NO V4-specific work (no TWAP / feed-ready /
+ * warmup call) — isV4Borrow lives entirely bot-side, so a V1/V3 borrow is
+ * never blocked by V4 readiness.
  *
  * Safety: agents get NO exemptions from the gates the human flow runs.
  * Same per-token caps, same imported-wallet cooldown, same TWAP, same
@@ -72,6 +85,10 @@ export async function buildBorrowHandler(c: Context) {
   const mint = String(b.collateral_mint ?? "");
   const amount = String(b.collateral_amount ?? "");
   const tier = Number(b.tier);
+  // Strict boolean — only the literal `true` routes the borrow to V4. A
+  // string "true" / 1 is deliberately ignored so a loosely-encoded client
+  // can't accidentally opt into the exit-armed (V4) program.
+  const hasExitArming = b.has_exit_arming === true;
   if (!borrower || !mint || !amount || ![0, 1, 2].includes(tier)) {
     return c.json(
       {
@@ -112,6 +129,7 @@ export async function buildBorrowHandler(c: Context) {
         collateral_mint: mint,
         collateral_amount: amount,
         tier,
+        has_exit_arming: hasExitArming,
       }),
       // 25s timeout — tx build can include RPC calls for blockhash + mint info
       signal: AbortSignal.timeout(25_000),
@@ -124,11 +142,42 @@ export async function buildBorrowHandler(c: Context) {
   }
 
   const text = await res.text();
-  let parsed: unknown;
+  let parsed: Record<string, unknown>;
   try {
-    parsed = JSON.parse(text);
+    parsed = JSON.parse(text) as Record<string, unknown>;
   } catch {
-    parsed = { error: "bot_returned_non_json", raw: text.slice(0, 500) };
+    // Never echo a raw upstream body — a CDN/proxy error page can carry
+    // internal detail. Log server-side; return a generic shape to the agent.
+    console.warn(`[build-borrow] non-JSON from bot (status ${res.status}):`, text.slice(0, 300));
+    parsed = { error: "bot_returned_non_json", status: res.status };
   }
-  return c.json(parsed as Record<string, unknown>, res.status as never);
+  // Classify-before-friendly: when the bot rejects a (would-be) V4 borrow for
+  // a known reason, attach a typed hint + retryability so the agent can react
+  // programmatically instead of parsing an opaque string. We AUGMENT, never
+  // replace, the bot's own fields.
+  if (!res.ok) {
+    const code = String(parsed.error ?? parsed.reason ?? "").toUpperCase();
+    const hint = classifyBorrowError(code);
+    if (hint) parsed = { ...parsed, classified: hint };
+  }
+  return c.json(parsed, res.status as never);
+}
+
+/** Map known bot rejection codes to an agent-actionable hint. */
+function classifyBorrowError(code: string): { reason: string; retryable: boolean; detail: string } | null {
+  if (code.includes("V4_TOKEN2022_EXITS_BLOCKED")) {
+    return {
+      reason: "exits_not_supported_for_token2022",
+      retryable: false,
+      detail: "This Token-2022 mint can't be opened as a V4 exit-armed loan. Retry with has_exit_arming=false to borrow on V1/V3 without exits.",
+    };
+  }
+  if (code.includes("V4_BORROWS_PAUSED")) {
+    return {
+      reason: "v4_borrows_paused",
+      retryable: true,
+      detail: "V4 exit-armed borrows are temporarily paused by the protocol. Retry later, or borrow with has_exit_arming=false.",
+    };
+  }
+  return null;
 }

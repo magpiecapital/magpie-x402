@@ -67,7 +67,7 @@ export async function buildRepayHandler(c: Context) {
   try {
     parsed = JSON.parse(text);
   } catch {
-    parsed = { error: "bot_returned_non_json", raw: text.slice(0, 500) };
+    parsed = { error: "bot_returned_non_json", status: res.status };
   }
   return c.json(parsed as Record<string, unknown>, res.status as never);
 }

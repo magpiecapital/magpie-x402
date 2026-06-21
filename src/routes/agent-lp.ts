@@ -1,5 +1,6 @@
 import type { Context } from "hono";
 import { PublicKey } from "@solana/web3.js";
+import { enforcePayerMatchesWallet } from "../lib/payer-bind.js";
 
 /**
  * Agent-as-LP endpoints. Completes the protocol-integration loop:
@@ -48,7 +49,10 @@ async function proxyJson(
   try {
     data = JSON.parse(text);
   } catch {
-    data = { error: "site_returned_non_json", raw: text.slice(0, 500) };
+    // Don't echo a raw upstream body to the caller — a CDN/proxy error page
+    // can carry internal details. Log server-side, return a generic shape.
+    console.warn(`[agent-lp] non-JSON from ${upstreamPath} (status ${res.status}):`, text.slice(0, 300));
+    data = { error: "site_returned_non_json", status: res.status };
   }
   return c.json(data as Record<string, unknown>, res.status as never);
 }
@@ -83,6 +87,12 @@ export async function buildDepositHandler(c: Context) {
     return c.json({ error: "lamports_must_be_u64_string" }, 400);
   }
 
+  // Security gate: the x402 payer must equal the depositor — you build a
+  // deposit tx only for your own wallet. Prevents a paying caller from
+  // burning server/RPC work building txs targeting arbitrary wallets.
+  const mismatch = enforcePayerMatchesWallet(c, depositor);
+  if (mismatch) return mismatch;
+
   return proxyJson(c, "/api/v1/lp/build-deposit", "POST", { depositor, lamports });
 }
 
@@ -115,6 +125,10 @@ export async function buildWithdrawHandler(c: Context) {
   if (!/^\d+$/.test(shares)) {
     return c.json({ error: "shares_must_be_u64_string" }, 400);
   }
+
+  // Security gate: x402 payer must equal the depositor (own-wallet only).
+  const mismatch = enforcePayerMatchesWallet(c, depositor);
+  if (mismatch) return mismatch;
 
   return proxyJson(c, "/api/v1/lp/build-withdraw", "POST", { depositor, shares });
 }

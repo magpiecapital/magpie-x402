@@ -2,11 +2,11 @@
 
 **MCP server exposing the Magpie Capital x402 API as native tools for Claude Desktop, Cursor, Windsurf, ChatGPT desktop, and any other MCP-aware agent host.**
 
-Drop one config block into your host and your agent can query Magpie's protocol state, simulate borrows, fetch credit scores, build deposit/withdraw transactions, and post conditional borrow intents — all as first-class tool calls. No bespoke client code, no API keys.
+Drop one config block into your host and your agent can query Magpie's protocol state, simulate borrows, fetch credit scores, build deposit/withdraw transactions, post conditional borrow intents, and arm self-owned in-vault take-profit / stop-loss exits on its own loans — all as first-class tool calls. No bespoke client code, no API keys.
 
 ## What it exposes
 
-19 tools wrapping the x402 endpoints:
+26 tools wrapping the x402 endpoints:
 
 **Free reads (work out of the box):**
 - `magpie_pool_state` — live LendingPool account
@@ -20,19 +20,40 @@ Drop one config block into your host and your agent can query Magpie's protocol 
 - `magpie_liquidatable` — loans currently liquidatable
 - `magpie_credit_leaderboard` — top wallets by credit score
 - `magpie_lp_state` — depositor position + pool context
+- `magpie_loan_by_pda` — single loan by on-chain loan PDA
+- `magpie_pools` — Magpie lending pools (program-version lanes + context)
+- `magpie_list_exits` — armed in-vault exit orders for a wallet
+- `magpie_modify_exit` — change an armed exit's trigger / params
+- `magpie_cancel_exit` — cancel an armed exit (loan stays Active)
 
 **Paid (require a configured Solana keypair):**
 - `magpie_credit_score` — 0.001 SOL
 - `magpie_token_risk` — 0.001 SOL (per-token risk profile)
-- `magpie_build_borrow` — 0.005 SOL
+- `magpie_build_borrow` — 0.005 SOL (pass `has_exit_arming: true` to route into the V4 in-vault-exit lane)
 - `magpie_build_repay` — 0.002 SOL
 - `magpie_build_deposit` — 0.002 SOL
 - `magpie_build_withdraw` — 0.002 SOL
 - `magpie_build_liquidate` — 0.003 SOL (liquidate a past-due loan, receive keeper bounty)
 - `magpie_create_intent` — 0.01 SOL (conditional borrow)
 - `magpie_get_intent` — 0.0005 SOL (poll)
+- `magpie_arm_exit` — 0.001 SOL (arm a self-owned in-vault TP / SL / trailing exit)
 
 When a paid tool fires, the server signs an x402 payment tx locally with your configured keypair and forwards the signature to magpie-x402. The keypair never leaves your machine.
+
+## Self-owned in-vault exits (V4)
+
+Magpie's V4 lane lets an agent arm **its own** take-profit, stop-loss, and trailing exits on **its own** active loan — and the sell happens **in-vault**: when a trigger fires, the collateral is auto-sold and the proceeds (SOL by default, or USDC) accumulate inside that loan's per-loan proceeds vault while the loan stays **Active**. Proceeds only ever reach your wallet through your own borrower-signed repay. There's no fire-and-close, and nothing the protocol can do to move your funds out.
+
+- `magpie_arm_exit` (**0.001 SOL**) — arm a TP / SL / trailing exit on a V4 loan you own. Set `direction` (`above` = take-profit, the default; `below` = stop-loss) and exactly one trigger: `target` (e.g. `"2x"` / `"0.7x"`), `price_usd`, `mc_usd` (e.g. `"5M"`, `"1.2B"`), or `trailing_bps` (stop-loss only). Optional `slippage_bps`, `dest` (`sol` | `usdc`), and `slice` for laddered exits.
+- `magpie_modify_exit` (**free**) — retune an armed order's trigger or params in place.
+- `magpie_cancel_exit` (**free**) — remove an armed order; the loan is untouched.
+- `magpie_list_exits` (**free**) — audit a wallet's armed orders, each with its distance-to-trigger.
+
+Every exit call is authenticated with a dependency-free Ed25519 **signed envelope** built locally from your configured keypair. For `magpie_arm_exit` the envelope is signed by the **same** keypair that pays the 0.001 SOL x402 challenge, so the bot's `payer == signer` invariant holds and only the owner of a loan can arm exits on it. The bot enforces a 5-minute freshness window and nonce-uniqueness on every envelope.
+
+To start a borrow that supports these exits, call `magpie_build_borrow` with `has_exit_arming: true` (routes into V4); leave it `false` for a plain memecoin (V1) borrow.
+
+> RWA / xStock collateral runs on the separate V3 lane, which is launch-gated — on the V3 launch, the same exit tooling will extend to RWA loans.
 
 ## Install
 
@@ -116,7 +137,7 @@ Use the same shape — point the host at `node /ABS/PATH/.../mcp/dist/index.js`,
 
 ## Free-only mode (no keypair)
 
-Omit `MAGPIE_MCP_PAYER_KEYPAIR` and all 11 free tools still work. Paid tools return a clear error explaining that no payer is configured. Useful for read-only research agents or as a no-friction first install.
+Omit `MAGPIE_MCP_PAYER_KEYPAIR` and the read-only free tools still work. Paid tools — and the envelope-signed exit tools (`magpie_arm_exit`, `magpie_modify_exit`, `magpie_cancel_exit`, which need the keypair to sign the envelope even though modify/cancel cost nothing) — return a clear error explaining that no payer is configured. Useful for read-only research agents or as a no-friction first install.
 
 ## Environment variables
 

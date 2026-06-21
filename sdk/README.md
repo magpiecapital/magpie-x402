@@ -51,6 +51,58 @@ const loan = await agent.borrow({
 // → { signature, loanId, borrowedLamports, feesPaidLamports }
 ```
 
+A no-exits borrow routes to the V1 program (memecoin collateral) — and, once it launches, to the V3 program for RWA collateral. Pass `hasExitArming: true` to route to the V4 in-vault program so you can arm take-profit / stop-loss exit orders on the loan afterward (see below).
+
+```ts
+const loan = await agent.borrow({
+  collateralMint, collateralAmount: 1_000_000_000n, tier: "express",
+  hasExitArming: true,   // → V4 in-vault loan; armExit() works on it
+});
+```
+
+### Arm an in-vault exit order (TP / SL) on your own loan
+
+Exit orders are **self-owned**: the SDK signs an Ed25519 envelope with your keypair, the x402 service forwards it to the bot, and the bot enforces that the signer owns the loan and that the loan is V4. No Telegram, no delegation, no custodial key — `armExit` pays **and** signs with the *same* keypair, so payer == signer always holds. Proceeds accumulate **in-vault** on the loan; the only path to your wallet is your own borrower-signed repay.
+
+The full lifecycle is `borrow({ hasExitArming: true })` → `armExit` → `listExits` → `repay` (via the bot/site, borrower-signed):
+
+```ts
+// 1. Borrow on V4 so the loan can hold exit orders.
+const loan = await agent.borrow({
+  collateralMint, collateralAmount: 1_000_000_000n, tier: "express",
+  hasExitArming: true,
+});
+
+// 2. Arm a take-profit at 2x and a stop-loss at 0.7x on that loan.
+//    Supply exactly ONE trigger: target ("2x"/"0.7x"), priceUsd, mcUsd
+//    ("5M"/"1.2B"), or trailingBps (stop-loss only).
+const tp = await agent.armExit({
+  loanId: loan.loanId,
+  direction: "above",      // take-profit (default)
+  target: "2x",
+  slippageBps: 100,
+  dest: "sol",             // sol | usdc
+});
+const sl = await agent.armExit({
+  loanId: loan.loanId,
+  direction: "below",      // stop-loss
+  target: "0.7x",
+});
+// each → { order, feesPaidLamports }   (arm is paid 0.001 SOL)
+
+// 3. List your armed orders any time (free).
+const { orders } = await agent.listExits();
+
+// 4. Modify or cancel without re-paying (both free).
+await agent.modifyExit({ orderId: tp.order.order_id as string, target: "3x" });
+await agent.cancelExit(sl.order.order_id as string);
+
+// 5. When you're done, repay (borrower-signed, via the site/bot) to release
+//    the collateral + any in-vault SOL proceeds back to your wallet.
+```
+
+`armExit` requires `loanId` plus exactly one trigger. `modifyExit` and `cancelExit` take the `orderId` returned by `armExit` / `listExits`. The 5-minute envelope freshness window and nonce-uniqueness are handled for you — `From`, `Nonce`, and `IssuedAt` are auto-added to the signed text.
+
 ### Deposit SOL as a liquidity provider
 
 ```ts
@@ -131,28 +183,36 @@ if (risk.risk_score > 60 || risk.flagged) {
 ### Free reads — never cost anything
 
 ```ts
-const pool = await agent.poolState();
+const pool = await agent.poolState();                 // single LendingPool
+const allPools = await agent.pools();                 // V1/V3/V4 pools in one call
 const myPos = await agent.lpPosition();
-const loans = await agent.walletLoans(agent.publicKey()!);
 const catalog = await agent.collateralCatalog();
 const quote = await agent.simulateBorrow({
   collateralMint, collateralAmount, decimals: 6,
   pricePerTokenUsd: 1.0, solPriceUsd: 200, tier: "all",
 });
+
+// Loan reads are now multi-version. Each loan carries a programVersion
+// ("v1" | "v3" | "v4") tag and exitsSupported flag (only true on V4).
+const byPda = await agent.loanByPda(loan.loanPda);     // unambiguous single loan
+const { loans, by_version } = await agent.walletLoans(agent.publicKey()!);
+const { liquidatable } = await agent.liquidatable({ limit: 10 });
 ```
+
+Multi-version reads fail soft: if one program version is unreachable, the others still return and the affected version is reported in a `partial` map (e.g. `{ v3: "error" }`) instead of throwing. V4 loans are excluded from `liquidatable()` by default (they auto-sell in-vault) — pass `{ includeV4: true }` to include them.
 
 ## What you pay per action
 
 | Method | Cost (SOL) |
 |---|---|
-| `poolState`, `loan`, `walletLoans`, `simulateBorrow`, `collateralCatalog`, `liquidatable`, `lpPosition` | **free** |
-| `creditScore`, `tokenRisk` | 0.001 |
+| `poolState`, `pools`, `loan`, `loanByPda`, `walletLoans`, `simulateBorrow`, `collateralCatalog`, `liquidatable`, `lpPosition`, `listExits` | **free** |
+| `creditScore`, `tokenRisk`, `armExit` | 0.001 |
 | `deposit`, `withdraw` | 0.002 |
 | `liquidate` | 0.003 |
 | `borrow` | 0.005 (covers the full build + cosign flow) |
 | `createIntent` | 0.01 (single payment covers entire intent lifecycle) |
 | `getIntent` (poll) | 0.0005 |
-| `cancelIntent` | free |
+| `cancelIntent`, `modifyExit`, `cancelExit` | free |
 
 Plus tiny Solana network fees (~5,000 lamports per transaction).
 
@@ -197,7 +257,7 @@ Premium Tier (in build, 4–6 weeks) — tokenized US equities ($NVDAx, $COINx, 
 
 [github.com/magpiecapital/magpie-x402](https://github.com/magpiecapital/magpie-x402) — SDK lives at `sdk/`. Sister projects in the same repo:
 
-- `examples/` — 10 turn-key TypeScript agents using this SDK directly
+- `examples/` — 12 turn-key TypeScript agents using this SDK directly
 - `mcp/` — MCP server exposing every SDK method as a tool for Claude / Cursor / Windsurf / ChatGPT desktop
 - `agents/yield-bot/` — reference autonomous agent built on this SDK
 

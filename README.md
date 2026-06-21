@@ -45,19 +45,28 @@
 | GET | `/.well-known/x402.json` | Free | Machine-readable endpoint catalog (auto-discovery) |
 | GET | `/openapi.json` | Free | OpenAPI 3.1 spec (for agent frameworks) |
 | GET | `/api/v1/pool` | Free | Live on-chain LendingPool state — totalDeposits, totalBorrowed, lifetime counters. 15s cache. |
-| GET | `/api/v1/loan/:loanId` | Free | Single loan by u64 ID. Direct Anchor account fetch. 10s cache. |
-| GET | `/api/v1/wallet/:wallet/loans?status=...` | Free | All loans owned by a wallet via `getProgramAccounts` + memcmp filter. Optional status filter. 8s cache. |
+| GET | `/api/v1/pools` | Free | All three strategy pools (V1 memecoin / V3 RWA / V4 in-vault) in one call, with a `partial` map if any version is unreachable. 15s cache. |
+| GET | `/api/v1/loan/:loanId?borrower=<pubkey>` | Free | Loans matching a u64 ID across V1/V3/V4. Returns a list (a borrower can hold the same numeric ID in more than one program) — each tagged with `program_version`. 10s cache. |
+| GET | `/api/v1/loan/by-pda/:loanPda` | Free | Single loan by its PDA — unambiguous, routed to V1/V3/V4 from the on-chain owner. Returns `program_version`, V4 in-vault exit state, and `exits_supported`. 10s cache. |
+| GET | `/api/v1/wallet/:wallet/loans?status=...` | Free | All loans owned by a wallet across V1/V3/V4 via `getProgramAccounts` + memcmp filter, each tagged with `program_version` (with a `by_version` count). Optional status filter. 8s cache. |
 | GET | `/api/v1/collateral/eligible` | Free | Catalog of every token currently approved as Magpie collateral. First-touch for new agent integrations. 1h cache. |
-| GET | `/api/v1/markets/liquidatable` | Free | Active loans at or past their on-chain due timestamp — the canonical liquidation-bot data feed. Sorted most-past-due-first. Optional `?within_seconds=` for pre-positioning. 8s cache. |
+| GET | `/api/v1/markets/liquidatable` | Free | Active loans at or past their on-chain due timestamp across V1/V3 — the canonical liquidation-bot data feed, each tagged with `program_version`. Sorted most-past-due-first. Optional `?within_seconds=` for pre-positioning, `?include_v4=true` to include in-vault V4 loans. 8s cache. |
 | GET | `/api/v1/agent/activity` | Free | Anonymized recent borrow/repay/liquidate events. First-touch "is this protocol alive?" feed for arriving agents. 15s cache. |
 | GET | `/api/v1/agent/protocol-pulse` | Free | 24h aggregates: active loans, active borrowers, borrow volume, liquidations. 30s cache. |
 | GET | `/api/v1/agent/leaderboard` | Free | Top wallets by Magpie credit score, anonymized. 60s cache. |
 | GET | `/api/v1/agent/lp-state?wallet=<pubkey>` | Free | Depositor position + pool context (shares, deposited, current value, yield, share-of-pool). 10s cache. |
+| GET | `/api/v1/agent/self-limit-close/list?wallet=<pubkey>` | Free | A wallet's armed in-vault exit orders (TP/SL) on its V4 loans. |
 | GET | `/api/v1/credit-score?wallet=<pubkey>` | 0.001 SOL | Magpie credit score (300–850) + tier benefits |
+| POST | `/api/v1/agent/build-borrow` | 0.005 SOL | Build an unsigned borrow tx. Pass `has_exit_arming: true` to route to the V4 in-vault program (so exit orders can be armed on the loan); otherwise routes to V1 (memecoin) — and, once it launches, V3 (RWA). |
 | POST | `/api/v1/agent/build-deposit` | 0.002 SOL | Build an unsigned LP-deposit tx (SOL → pool). Caller signs and submits. |
 | POST | `/api/v1/agent/build-withdraw` | 0.002 SOL | Build an unsigned LP-withdraw tx (shares → SOL). Server validates against the on-chain position and refuses unsafe chunk sizes. |
+| POST | `/api/v1/agent/self-limit-close/arm` | 0.001 SOL | Arm an in-vault take-profit / stop-loss on your OWN V4 loan. Body is an Ed25519 signed envelope; pays AND signs with the same keypair, so payer == signer. Bot enforces ownership + V4-only. |
+| POST | `/api/v1/agent/self-limit-close/modify` | Free | Modify an armed exit order (signed envelope). |
+| POST | `/api/v1/agent/self-limit-close/cancel` | Free | Cancel an armed exit order (signed envelope). |
 
 All free endpoints query the on-chain Magpie program directly and have proper `Cache-Control` headers so CDN edges serve repeat reads without round-tripping.
+
+Loan and pool reads are **multi-version**: every loan/pool is resolved across the V1 (memecoin), V3 (RWA — on the V3 launch), and V4 (in-vault auto-sell) programs and tagged with its `program_version`. These reads fail soft — if one version is unreachable, the rest still return and the affected version is reported in a `partial` map rather than erroring the whole call. The `/api/v1/agent/self-limit-close/*` surface lets a borrower-agent arm, modify, cancel, and list **self-owned** in-vault exit orders (take-profit / stop-loss) on its own V4 loans, authenticated by an Ed25519 signed envelope where the x402 payer is also the envelope signer.
 
 > 🚀 **Building your first Magpie agent?** Read [`QUICKSTART.md`](./QUICKSTART.md) — zero to a working autonomous borrow agent on Solana in 10 minutes, using the typed SDK.
 >

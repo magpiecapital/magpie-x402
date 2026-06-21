@@ -41,7 +41,7 @@ async function proxyToBot(
   }
   const text = await res.text();
   try { return { status: res.status, data: JSON.parse(text) }; }
-  catch { return { status: res.status, data: { error: "bot_returned_non_json", raw: text.slice(0, 500) } }; }
+  catch { return { status: res.status, data: { error: "bot_returned_non_json", status: res.status } }; }
 }
 
 export async function buildExtendHandler(c: Context) {
