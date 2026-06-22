@@ -66,7 +66,7 @@ const loan = await agent.borrow({
 
 Exit orders are **self-owned**: the SDK signs an Ed25519 envelope with your keypair, the x402 service forwards it to the bot, and the bot enforces that the signer owns the loan and that the loan is V4. No Telegram, no delegation, no custodial key — `armExit` pays **and** signs with the *same* keypair, so payer == signer always holds. Proceeds accumulate **in-vault** on the loan; the only path to your wallet is your own borrower-signed repay.
 
-The full lifecycle is `borrow({ hasExitArming: true })` → `armExit` → `listExits` → `repay` (via the bot/site, borrower-signed):
+The full lifecycle is `borrow({ hasExitArming: true })` → `armExit` → `listExits` → `repay({ loanPda })` (borrower-signed, signs locally):
 
 ```ts
 // 1. Borrow on V4 so the loan can hold exit orders.
@@ -99,8 +99,13 @@ const { orders } = await agent.listExits();
 await agent.modifyExit({ orderId: tp.order.order_id as string, target: "3x" });
 await agent.cancelExit(sl.order.order_id as string);
 
-// 5. When you're done, repay (borrower-signed, via the site/bot) to release
-//    the collateral + any in-vault SOL proceeds back to your wallet.
+// 5. When you're done, repay to release the collateral + any in-vault SOL
+//    proceeds back to your wallet. Pass the loan's PDA — get it from
+//    `agent.walletLoans(myWallet)` (each AgentLoan carries `loanPda`). The
+//    service builds an UNSIGNED, pre-simulated repay tx; your keypair signs
+//    it LOCALLY and submits — the on-chain repay_loan needs only your
+//    signature, Magpie never co-signs.
+await agent.repay({ loanPda });   // paid 0.002 SOL → { signature, loanPda, feesPaidLamports }
 ```
 
 `armExit` requires `loanId` plus exactly one trigger. `modifyExit` and `cancelExit` take the `orderId` returned by `armExit` / `listExits`. The 5-minute envelope freshness window and nonce-uniqueness are handled for you — `From`, `Nonce`, and `IssuedAt` are auto-added to the signed text.
