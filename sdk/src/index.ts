@@ -165,6 +165,15 @@ export interface LiquidateResult {
   feesPaidLamports: bigint;
 }
 
+export interface RepayResult {
+  /** On-chain tx signature of the confirmed repay. */
+  signature: string;
+  /** The loan PDA that was repaid and closed. */
+  loanPda: string;
+  /** Total x402 + network fees paid in this round-trip. */
+  feesPaidLamports: bigint;
+}
+
 export interface IntentResult {
   intentId: string;
   status: "pending" | "matched" | "expired" | "cancelled";
@@ -506,6 +515,38 @@ export class MagpieAgent {
       signature: sig,
       loanPda,
       collateralAmount: BigInt(built.data.summary.collateral_amount_raw),
+      feesPaidLamports: built.paid?.amountLamports ?? 0n,
+    };
+  }
+
+  /**
+   * Repay an active loan in full and close it. Borrower-signed and fully
+   * non-custodial: the service builds an UNSIGNED repay tx (pre-simulated
+   * server-side so a doomed repay is never returned for signing), your
+   * keypair signs it LOCALLY, and it submits via standard RPC. The on-chain
+   * `repay_loan` instruction needs only the borrower's signature — Magpie
+   * never co-signs or repays on your behalf.
+   *
+   * This is the only path that returns your collateral TO YOU. (A past-due
+   * loan can alternatively be closed by a permissionless keeper `liquidate()`,
+   * which seizes collateral without the borrower.)
+   *
+   * Paid: 0.002 SOL (the build-repay call). Discover your loan PDAs via
+   * `walletLoans()`.
+   */
+  async repay(opts: { loanPda: PublicKey | string }): Promise<RepayResult> {
+    const keypair = this.requireKeypair("repay");
+    const loanPda =
+      typeof opts.loanPda === "string" ? opts.loanPda : opts.loanPda.toBase58();
+    const built = await paidCall<{
+      partial_signed_tx_b64: string;
+    }>(this.ctx, "POST", "/api/v1/agent/build-repay", {
+      body: { borrower_wallet: keypair.publicKey.toBase58(), loan_pda: loanPda },
+    });
+    const sig = await this.signAndSubmit(built.data.partial_signed_tx_b64, keypair);
+    return {
+      signature: sig,
+      loanPda,
       feesPaidLamports: built.paid?.amountLamports ?? 0n,
     };
   }

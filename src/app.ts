@@ -144,7 +144,7 @@ app.get("/", (c) =>
       mint: "9UuLsJ3jf8ViBNeRcwXD53re5G3ypgfKK3s2EiMMpump",
       chain: "solana",
       fee_share:
-        "70% of x402 protocol fees are distributed to $MAGPIE holders. Every agent borrow / arm-exit / intent call you make here accrues fees, and 70% of them flow back to the token — agent adoption of this API directly rewards $MAGPIE holders.",
+        "A share of Magpie protocol fees accrues to a $MAGPIE holder-rewards pool and is distributed pro-rata to on-chain $MAGPIE holders in SOL — no staking, no lockup. 70% is the governance-ratified (MGP-001) target allocation for protocol fees; distributions run on a governance cadence (not an automatic per-call split). x402 API call fees are collected to the protocol fee wallet and feed the same holder-rewards economics — growing agent adoption grows the fees that reward $MAGPIE holders.",
     },
     endpoints: {
       free: [
@@ -539,7 +539,7 @@ app.get("/.well-known/x402.json", (c) =>
       mint: "9UuLsJ3jf8ViBNeRcwXD53re5G3ypgfKK3s2EiMMpump",
       chain: "solana",
       fee_share:
-        "70% of x402 protocol fees are distributed to $MAGPIE holders. Every agent borrow / arm-exit / intent call here accrues fees, and 70% of them flow back to the token — agent adoption of this API directly rewards $MAGPIE holders.",
+        "A share of Magpie protocol fees accrues to a $MAGPIE holder-rewards pool and is distributed pro-rata to on-chain $MAGPIE holders in SOL — no staking, no lockup. 70% is the governance-ratified (MGP-001) target allocation for protocol fees; distributions run on a governance cadence (not an automatic per-call split). x402 API call fees are collected to the protocol fee wallet and feed the same holder-rewards economics — growing agent adoption grows the fees that reward $MAGPIE holders.",
     },
     endpoints: [
       {
