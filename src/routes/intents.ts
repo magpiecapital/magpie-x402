@@ -1,5 +1,6 @@
 import type { Context } from "hono";
 import { PublicKey } from "@solana/web3.js";
+import { verifyAgentFromContext } from "../lib/agent-envelope.js";
 
 /**
  * Conditional borrow intents — "limit orders for borrows".
@@ -236,9 +237,21 @@ export async function cancelIntentHandler(c: Context) {
   if (!id) return c.json({ error: "missing_id" }, 400);
   if (!/^[A-Za-z0-9_-]{16,32}$/.test(id)) return c.json({ error: "invalid_intent_id" }, 400);
 
-  return forward(c, `${BOT_API}/api/v1/agent/intent?id=${encodeURIComponent(id)}`, {
-    method: "DELETE",
-  });
+  // AUTHZ (was IDOR): intent-cancel is a per-resource destructive write, and the
+  // intent id is paid-but-leakable (it appears in list/poll/webhook/create
+  // responses). Require an Ed25519-signed envelope — action "intent-cancel/v1",
+  // OrderId bound to this intent id, From == signer, fresh — exactly like the
+  // hardened limit-close-cancel route. Forward the VERIFIED signer as ?owner=
+  // so the bot scopes the UPDATE to intent.borrower_wallet == signer. Without
+  // this, anyone could cancel any agent's pending intent and forfeit its fee.
+  const verified = verifyAgentFromContext(c, "intent-cancel/v1", { expectedOrderId: id });
+  if (!verified.ok) return c.json({ error: verified.error }, verified.status as never);
+
+  return forward(
+    c,
+    `${BOT_API}/api/v1/agent/intent?id=${encodeURIComponent(id)}&owner=${encodeURIComponent(verified.signer)}`,
+    { method: "DELETE" },
+  );
 }
 
 /**

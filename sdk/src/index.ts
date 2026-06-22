@@ -631,10 +631,17 @@ export class MagpieAgent {
     };
   }
 
-  /** Cancel a pending intent. Free. */
+  /**
+   * Cancel a pending intent on your OWN wallet. Free. Signs an
+   * "intent-cancel/v1" Ed25519 envelope bound to the intent id — the service
+   * verifies the signature and the bot scopes the cancel to the signer's
+   * wallet, so a leaked intent id alone can never cancel your intent.
+   */
   async cancelIntent(intentId: string): Promise<void> {
+    const keypair = this.requireKeypair("cancelIntent");
     await paidCall(this.ctx, "DELETE", "/api/v1/agent/intent", {
       query: { id: intentId },
+      headers: buildManagementHeaders(keypair, "intent-cancel/v1", intentId),
     });
   }
 
