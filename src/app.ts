@@ -139,6 +139,13 @@ app.get("/", (c) =>
     no_custody:
       "This service holds no keys, signs no user transactions, and cannot move user funds. It verifies x402 payments, builds UNSIGNED txs, and forwards signed envelopes. The on-chain program is the final guard.",
     pricing: "Free to discover + read. You pay only on the write side (borrow / arm exit / intents).",
+    magpie_token: {
+      symbol: "$MAGPIE",
+      mint: "9UuLsJ3jf8ViBNeRcwXD53re5G3ypgfKK3s2EiMMpump",
+      chain: "solana",
+      fee_share:
+        "70% of x402 protocol fees are distributed to $MAGPIE holders. Every agent borrow / arm-exit / intent call you make here accrues fees, and 70% of them flow back to the token — agent adoption of this API directly rewards $MAGPIE holders.",
+    },
     endpoints: {
       free: [
         "GET /health",
