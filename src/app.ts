@@ -197,6 +197,73 @@ app.get("/", (c) =>
 
 app.get("/health", (c) => c.json({ ok: true, ts: new Date().toISOString() }));
 
+// ─── Agent self-discovery: /llms.txt + /agents.txt ──────────────────
+// A plaintext, machine-first description so an LLM/agent that lands on the
+// site can self-onboard without scraping HTML. Mirrors the well-known catalog
+// + OpenAPI but in the llms.txt convention many agent hosts now read.
+const LLMS_TXT = `# Magpie x402 — Agent Lending on Solana
+
+> Permissionless agent lending on Solana over x402 (HTTP 402, pay-per-call).
+> No signup. No API key. ZERO custody — the service holds no keys; your agent
+> signs every unsigned tx locally. The first lending an autonomous agent can
+> drive end-to-end on its OWN assets: borrow, arm exits, repay.
+
+## What it is
+- Borrow SOL against collateral you hold, fully non-custodial.
+- Memecoins route to V1; tokenized stocks / RWAs route to V3.
+- 170+ approved collateral tokens live in the catalog.
+- Arm self-owned in-vault take-profit / stop-loss exits (V4): when an exit
+  fires, the SOL proceeds stay inside the loan's own vault and the loan stays
+  Active until you repay.
+- Repay is borrower-signed: the service builds an UNSIGNED repay tx that only
+  you can sign — Magpie never co-signs. (A past-due loan can also be closed by
+  permissionless keeper liquidation.)
+
+## How it works (x402)
+- Free reads: pool state, catalog, simulate-borrow — call directly.
+- Paid writes: borrow / arm-exit / repay tx builders — gated by HTTP 402,
+  pay-per-call. Pay, receive an UNSIGNED Solana tx, sign locally, broadcast.
+- The service never holds keys and never co-signs. Custody never leaves you.
+
+## Discovery
+- Machine catalog: https://x402.magpie.capital/.well-known/x402.json
+- OpenAPI: https://x402.magpie.capital/openapi.json
+- Site: https://x402.magpie.capital
+- Repo: https://github.com/magpiecapital/magpie-x402
+
+## SDK — @magpieloans/magpie-agent
+npm i @magpieloans/magpie-agent
+Typed one-liners; signs locally; non-custodial:
+- borrow({ hasExitArming })
+- armExit({ target: '2x' })
+- repay({ loanPda })
+- simulateBorrow
+- deposit / withdraw (LP)
+
+## MCP — @magpieloans/magpie-mcp
+npx -y @magpieloans/magpie-mcp
+Native tools for Claude Desktop / Cursor / Windsurf / ChatGPT:
+- live pool state
+- simulate-borrow
+- conditional borrow intents
+- arm in-vault exits
+
+## $MAGPIE
+- Mint: 9UuLsJ3jf8ViBNeRcwXD53re5G3ypgfKK3s2EiMMpump (Solana)
+- A share of Magpie protocol fees accrues to a $MAGPIE holder-rewards pool,
+  distributed pro-rata in SOL — no staking, no lockup.
+- 70% is the governance-ratified (MGP-001) target allocation; distributions
+  run on a governance cadence.
+- x402 call fees feed the same holder-rewards economics: more agent adoption
+  grows the fees that reward holders.
+
+## Why
+The first lending an autonomous agent can drive end-to-end on its own assets —
+borrow, arm exits, repay — permissionlessly and non-custodially.
+`;
+app.get("/llms.txt", (c) => c.text(LLMS_TXT));
+app.get("/agents.txt", (c) => c.text(LLMS_TXT));
+
 // ─── Direct on-chain protocol query (free, cached) ──────────────
 // "Direct communication with the lending protocol" — this endpoint
 // decodes the live LendingPool Anchor account from the canonical
