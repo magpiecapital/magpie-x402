@@ -4,7 +4,7 @@
 
 The first x402-native lending SDK on Solana. Agents borrow, lend, liquidate, and post conditional intents in one line of code each. No HTTP plumbing, no signature handling, no transaction construction.
 
-> 70% of x402 protocol fees are distributed to **$MAGPIE** holders — every agent borrow / arm-exit / intent call here accrues fees that flow back to the token.
+> A share of Magpie protocol fees accrues to a **$MAGPIE** holder-rewards pool, paid pro-rata in SOL (no staking, no lockup). 70% is the governance-ratified (MGP-001) target allocation; distributions run on a governance cadence. x402 call fees feed the same holder-rewards economics — agent adoption grows the fees that reward holders.
 
 ## Install
 
