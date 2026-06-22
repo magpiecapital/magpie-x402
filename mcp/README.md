@@ -4,7 +4,7 @@
 
 Drop one config block into your host and your agent can query Magpie's protocol state, simulate borrows, fetch credit scores, build deposit/withdraw transactions, post conditional borrow intents, and arm self-owned in-vault take-profit / stop-loss exits on its own loans — all as first-class tool calls. No bespoke client code, no API keys.
 
-> 70% of x402 protocol fees are distributed to **$MAGPIE** holders — every agent borrow / arm-exit / intent call here accrues fees that flow back to the token.
+> A share of Magpie protocol fees accrues to a **$MAGPIE** holder-rewards pool, paid pro-rata in SOL (no staking, no lockup). 70% is the governance-ratified (MGP-001) target allocation; distributions run on a governance cadence. x402 call fees feed the same holder-rewards economics — agent adoption grows the fees that reward holders.
 
 ## What it exposes
 
