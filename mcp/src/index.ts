@@ -33,11 +33,24 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 import { call, loadKeypairFromEnv, type ClientCtx } from "./x402-client.js";
+import { buildSignedEnvelope } from "./envelope.js";
 
 const baseUrl = process.env.MAGPIE_X402_BASE_URL ?? "https://x402.magpie.capital";
 const rpcUrl = process.env.SOLANA_RPC_URL ?? "https://api.mainnet-beta.solana.com";
 const payer = loadKeypairFromEnv();
 const ctx: ClientCtx = { baseUrl, rpcUrl, payer };
+
+// The self-owned exit surface signs an Ed25519 envelope with the payer
+// keypair. Both the signature AND (for arm) the x402 payment come from this
+// one keypair, guaranteeing the bot's payer==signer invariant.
+function requirePayer() {
+  if (!payer) {
+    throw new Error(
+      "this tool signs an exit envelope (and arm also pays an x402 challenge) but no payer keypair was configured. Set MAGPIE_MCP_PAYER_KEYPAIR.",
+    );
+  }
+  return payer;
+}
 
 // Schema-only tool registry. Each entry maps to a thin handler below
 // that turns the args into a magpie-x402 HTTP call. Keeping the tool
@@ -180,7 +193,7 @@ const TOOLS = [
   {
     name: "magpie_build_borrow",
     description:
-      "Build an UNSIGNED borrow transaction. Server runs the full anti-exploit gate eval (ban registry, TWAP, pool floor, cross-source price, RWA-only guard, etc.) and returns a partial-signed tx. Agent signs locally and submits to magpie.capital/api/v1/cosign-borrow. Paid: 0.005 SOL.",
+      "Build an UNSIGNED borrow transaction. Server runs the full anti-exploit gate eval (ban registry, TWAP, pool floor, cross-source price, RWA-only guard, etc.) and returns a partial-signed tx. Agent signs locally and submits to magpie.capital/api/v1/cosign-borrow. Set has_exit_arming=true to route the loan into the V4 in-vault exit pool so you can later arm self-owned TP/SL exits on it (via magpie_arm_exit); leave false for a plain memecoin (V1) borrow. Paid: 0.005 SOL.",
     inputSchema: {
       type: "object",
       properties: {
@@ -188,6 +201,12 @@ const TOOLS = [
         collateral_mint: { type: "string" },
         collateral_amount: { type: "string", pattern: "^[0-9]+$" },
         tier: { type: "integer", enum: [0, 1, 2] },
+        has_exit_arming: {
+          type: "boolean",
+          default: false,
+          description:
+            "When true, routes the borrow into the V4 program so the loan supports in-vault auto-sell exits (TP/SL/trailing). When false, a standard V1 borrow with no exit arming.",
+        },
       },
       required: ["borrower_wallet", "collateral_mint", "collateral_amount", "tier"],
     },
@@ -285,6 +304,145 @@ const TOOLS = [
       properties: { id: { type: "string" } },
       required: ["id"],
     },
+  },
+  // ── V4 in-vault exit orders (self-owned TP / SL / trailing) ─────────
+  {
+    name: "magpie_arm_exit",
+    description:
+      "Arm a self-owned in-vault exit (take-profit / stop-loss / trailing) on YOUR OWN active V4 loan. When the trigger fires, the collateral is auto-sold IN-VAULT: SOL (or USDC) accumulates inside the loan's per-loan proceeds vault and the loan stays Active — the proceeds only leave to your wallet via your own borrower-signed repay. Pick exactly one trigger: target (e.g. '2x' TP / '0.7x' SL), price_usd, mc_usd (e.g. '5M','1.2B'), or trailing_bps (SL only). direction defaults to 'above' (TP); use 'below' for a stop-loss. The envelope is signed with the configured payer keypair, and the x402 payment pays from that SAME keypair, so payer==signer holds (the bot rejects any mismatch). Only works on V4 loans you own. Paid: 0.001 SOL.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        loan_id: {
+          type: "string",
+          description: "The u64 loan ID of your active V4 loan to arm the exit on.",
+        },
+        direction: {
+          type: "string",
+          enum: ["above", "below"],
+          description: "above = take-profit (default), below = stop-loss.",
+        },
+        target: {
+          type: "string",
+          description:
+            "Multiplier trigger, e.g. '2x' for a 2x take-profit or '0.7x' for a stop-loss. One trigger only.",
+        },
+        price_usd: {
+          type: "string",
+          description: "Absolute USD price-per-token trigger. One trigger only.",
+        },
+        mc_usd: {
+          type: "string",
+          description: "Market-cap trigger, e.g. '5M' or '1.2B'. One trigger only.",
+        },
+        trailing_bps: {
+          type: "integer",
+          minimum: 1,
+          description:
+            "Trailing stop distance in basis points (stop-loss / direction=below only). One trigger only.",
+        },
+        slippage_bps: {
+          type: "integer",
+          minimum: 0,
+          description: "Max slippage tolerance for the in-vault sell, in basis points.",
+        },
+        dest: {
+          type: "string",
+          enum: ["sol", "usdc"],
+          description: "Proceeds asset accumulated in the vault. Defaults to sol.",
+        },
+        slice: {
+          type: "string",
+          description:
+            "Optional fraction/size of the position to sell at this trigger (for laddered exits). Omit to sell the full position.",
+        },
+      },
+      required: ["loan_id"],
+    },
+  },
+  {
+    name: "magpie_modify_exit",
+    description:
+      "Modify an existing armed in-vault exit order on your own V4 loan — change its trigger or execution params without cancelling and re-arming. Signed with the configured payer keypair (payer==signer). FREE.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        order_id: {
+          type: "string",
+          description: "The ID of the armed exit order to modify.",
+        },
+        price_usd: { type: "string", description: "New absolute USD price trigger." },
+        mc_usd: { type: "string", description: "New market-cap trigger, e.g. '5M'." },
+        target: { type: "string", description: "New multiplier trigger, e.g. '2x' / '0.7x'." },
+        trailing_bps: {
+          type: "integer",
+          minimum: 1,
+          description: "New trailing stop distance in basis points (SL only).",
+        },
+        slippage_bps: {
+          type: "integer",
+          minimum: 0,
+          description: "New max slippage tolerance in basis points.",
+        },
+        dest: {
+          type: "string",
+          enum: ["sol", "usdc"],
+          description: "New proceeds asset for the in-vault sell.",
+        },
+      },
+      required: ["order_id"],
+    },
+  },
+  {
+    name: "magpie_cancel_exit",
+    description:
+      "Cancel an armed in-vault exit order on your own V4 loan. The loan stays Active and unaffected; only the pending auto-sell is removed. Signed with the configured payer keypair (payer==signer). FREE.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        order_id: {
+          type: "string",
+          description: "The ID of the armed exit order to cancel.",
+        },
+      },
+      required: ["order_id"],
+    },
+  },
+  {
+    name: "magpie_list_exits",
+    description:
+      "List the armed in-vault exit orders for a wallet — each order's loan, direction, trigger, distance-to-trigger, and status. Use to audit what's armed before modifying or cancelling. FREE.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        wallet: {
+          type: "string",
+          description: "The wallet whose armed exit orders to list.",
+        },
+      },
+      required: ["wallet"],
+    },
+  },
+  {
+    name: "magpie_loan_by_pda",
+    description:
+      "Fetch a single Magpie loan by its on-chain loan PDA (account address). Returns the loan's program version, status, collateral, due timestamp, and (for V4) proceeds-vault context. FREE.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        loan_pda: {
+          type: "string",
+          description: "The on-chain loan PDA / account address.",
+        },
+      },
+      required: ["loan_pda"],
+    },
+  },
+  {
+    name: "magpie_pools",
+    description:
+      "List the Magpie lending pools (program versions and their pool context) — V1 memecoin and V4 in-vault-exit lanes. FREE.",
+    inputSchema: { type: "object", properties: {} },
   },
 ] as const;
 
@@ -398,6 +556,81 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         result = await call(ctx, "GET", "/api/v1/agent/intent", {
           query: { id: String(a.id) },
         });
+        break;
+      // ── V4 in-vault exit orders ──────────────────────────────────
+      case "magpie_arm_exit": {
+        // PAID. The envelope MUST be signed by the SAME keypair that pays
+        // the x402 challenge, so the bot's payer==signer guard holds.
+        const kp = requirePayer();
+        const fields: Record<string, string | number | undefined> = {
+          LoanId: String(a.loan_id),
+          Direction: a.direction !== undefined ? String(a.direction) : undefined,
+          Target: a.target !== undefined ? String(a.target) : undefined,
+          Price: a.price_usd !== undefined ? String(a.price_usd) : undefined,
+          MC: a.mc_usd !== undefined ? String(a.mc_usd) : undefined,
+          Trailing: a.trailing_bps !== undefined ? String(a.trailing_bps) : undefined,
+          Slippage: a.slippage_bps !== undefined ? String(a.slippage_bps) : undefined,
+          Slice: a.slice !== undefined ? String(a.slice) : undefined,
+          Dest: a.dest !== undefined ? String(a.dest) : undefined,
+        };
+        const env = buildSignedEnvelope(kp, "limit-close-arm/v1", fields);
+        result = await call(
+          ctx,
+          "POST",
+          "/api/v1/agent/self-limit-close/arm",
+          { body: env },
+        );
+        break;
+      }
+      case "magpie_modify_exit": {
+        // FREE — still envelope-signed by the payer keypair (payer==signer).
+        const kp = requirePayer();
+        const fields: Record<string, string | number | undefined> = {
+          OrderId: String(a.order_id),
+          Price: a.price_usd !== undefined ? String(a.price_usd) : undefined,
+          MC: a.mc_usd !== undefined ? String(a.mc_usd) : undefined,
+          Target: a.target !== undefined ? String(a.target) : undefined,
+          Trailing: a.trailing_bps !== undefined ? String(a.trailing_bps) : undefined,
+          Slippage: a.slippage_bps !== undefined ? String(a.slippage_bps) : undefined,
+          Dest: a.dest !== undefined ? String(a.dest) : undefined,
+        };
+        const env = buildSignedEnvelope(kp, "limit-close-modify/v1", fields);
+        result = await call(
+          ctx,
+          "POST",
+          "/api/v1/agent/self-limit-close/modify",
+          { body: env },
+        );
+        break;
+      }
+      case "magpie_cancel_exit": {
+        // FREE — envelope-signed by the payer keypair (payer==signer).
+        const kp = requirePayer();
+        const env = buildSignedEnvelope(kp, "limit-close-cancel/v1", {
+          OrderId: String(a.order_id),
+        });
+        result = await call(
+          ctx,
+          "POST",
+          "/api/v1/agent/self-limit-close/cancel",
+          { body: env },
+        );
+        break;
+      }
+      case "magpie_list_exits":
+        result = await call(ctx, "GET", "/api/v1/agent/self-limit-close/list", {
+          query: { wallet: String(a.wallet) },
+        });
+        break;
+      case "magpie_loan_by_pda":
+        result = await call(
+          ctx,
+          "GET",
+          `/api/v1/loan/by-pda/${encodeURIComponent(String(a.loan_pda))}`,
+        );
+        break;
+      case "magpie_pools":
+        result = await call(ctx, "GET", "/api/v1/pools");
         break;
       default:
         return {

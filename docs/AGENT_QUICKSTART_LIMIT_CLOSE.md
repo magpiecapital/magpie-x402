@@ -41,7 +41,7 @@ borrower            telegram bot                 magpie-x402            agent
    │                     │                           │                    │
    │                     │                           │                    │
    │                     │                           │                    │
-   │                     │     GET /delegations      │  X-Agent-Pubkey   │
+   │                     │     GET /delegations      │  signed envelope  │
    │                     │ ◄─────────────────────────┤◄───────────────────│
    │                     │      [{user_wallet,       │                    │
    │                     │        bounds, …}]        │                    │
@@ -79,7 +79,39 @@ These let an agent navigate without paying.
 
 The execution fee (1% of proceeds at fire time) is taken on the engine side from the swap proceeds — it's NOT a separate x402 charge.
 
-All free endpoints require the `X-Agent-Pubkey` header. The paid endpoint identifies the agent via the x402 payment payer pubkey (more secure — the agent can't lie about being someone else).
+All free (management) endpoints require a **signed Ed25519 envelope**, NOT a self-asserted header. You sign a short message with the SAME agent keypair and send three headers:
+
+| Header | Value |
+|---|---|
+| `X-Magpie-Env-Msg` | base64 of the signed UTF-8 message |
+| `X-Magpie-Env-Sig` | base58 of the 64-byte Ed25519 signature |
+| `X-Magpie-Env-Signer` | base58 agent pubkey (the identity — must match `From:` in the message) |
+
+The signed message is newline-joined and binds the action (and, for order-scoped ops, the target order id):
+
+```
+magpie: <action>
+From: <your agent pubkey>     # must equal X-Magpie-Env-Signer
+OrderId: <id>                 # only for get / modify / cancel
+Nonce: <uuid>
+IssuedAt: <ISO-8601>          # must be within 5 minutes
+```
+
+Per-endpoint action strings:
+
+| Endpoint | `magpie:` action | OrderId bound? |
+|---|---|---|
+| `POST /preflight` | `limit-close-preflight/v1` | no |
+| `GET ?id=` | `limit-close-get/v1` | yes (the `id` query) |
+| `GET /list` | `limit-close-list/v1` | no |
+| `GET /delegations` | `limit-close-delegations/v1` | no |
+| `GET /eligible-loans` | `limit-close-eligible/v1` | no |
+| `PATCH /modify` | `limit-close-modify/v1` | yes (`body.id`) |
+| `DELETE ?id=` | `limit-close-cancel/v1` | yes (the `id` query) |
+
+> **Why the change (security, 2026-06-21):** agent pubkeys are public, so a plain `X-Agent-Pubkey` header let anyone pass another agent's pubkey to cancel / modify / enumerate that agent's armed exit orders — silently disarming a borrower's stop-loss. The signature now proves control of the key; a forged or cross-agent-replayed header can no longer pass. The verified signer, and only the verified signer, is forwarded to the bot as `agent_pubkey`.
+
+The paid `/arm` endpoint identifies the agent via the x402 payment payer pubkey (already secure — the agent can't lie about being someone else), so it does NOT need the envelope.
 
 ---
 
@@ -88,9 +120,29 @@ All free endpoints require the `X-Agent-Pubkey` header. The paid endpoint identi
 A minimal agent loop, in pseudocode:
 
 ```ts
+// signEnvelope(action, { orderId? }) builds the newline-joined message,
+// signs it with MY_KEYPAIR, and returns the three X-Magpie-Env-* headers.
+// (The SDK ships this helper; see envelope spec in "Endpoints" above.)
+function signEnvelope(action: string, opts: { orderId?: string } = {}) {
+  const lines = [
+    `magpie: ${action}`,
+    `From: ${MY_PUBKEY}`,
+    ...(opts.orderId ? [`OrderId: ${opts.orderId}`] : []),
+    `Nonce: ${crypto.randomUUID()}`,
+    `IssuedAt: ${new Date().toISOString()}`,
+  ];
+  const msg = Buffer.from(lines.join("\n"), "utf8");
+  const sig = ed25519Sign(msg, MY_KEYPAIR.secretKey);
+  return {
+    "X-Magpie-Env-Msg": msg.toString("base64"),
+    "X-Magpie-Env-Sig": bs58.encode(sig),
+    "X-Magpie-Env-Signer": MY_PUBKEY,
+  };
+}
+
 // 1. startup — what surface am I working over?
 const delegations = await client.get("/api/v1/agent/limit-close/delegations", {
-  headers: { "x-agent-pubkey": MY_PUBKEY },
+  headers: signEnvelope("limit-close-delegations/v1"),
 });
 // delegations.delegations = [{ user_wallet, bounds, usage }, …]
 
@@ -98,7 +150,7 @@ const delegations = await client.get("/api/v1/agent/limit-close/delegations", {
 for (const d of delegations.delegations) {
   const loans = await client.get(
     `/api/v1/agent/limit-close/eligible-loans?wallet=${d.user_wallet}`,
-    { headers: { "x-agent-pubkey": MY_PUBKEY } },
+    { headers: signEnvelope("limit-close-eligible/v1") },
   );
   // loans.loans = [{ loan_id, eligible, ineligibility_reasons?, … }]
 
@@ -109,7 +161,7 @@ for (const d of delegations.delegations) {
   // 4. PREFLIGHT BEFORE PAYING. This is free; it saves the arm fee
   //    if anything would block the live arm.
   const dry = await client.post("/api/v1/agent/limit-close/preflight", {
-    headers: { "x-agent-pubkey": MY_PUBKEY },
+    headers: signEnvelope("limit-close-preflight/v1"),
     body: {
       user_wallet: d.user_wallet,
       loan_id: loan.loan_id,
@@ -143,8 +195,9 @@ for (const d of delegations.delegations) {
   log("armed", armed.order_id);
 
   // 6. later — if conditions change, modify (free) instead of cancel+re-arm.
+  //    Order-scoped actions bind OrderId in the signed envelope.
   await client.patch("/api/v1/agent/limit-close/modify", {
-    headers: { "x-agent-pubkey": MY_PUBKEY },
+    headers: signEnvelope("limit-close-modify/v1", { orderId: armed.order_id }),
     body: {
       id: armed.order_id,
       trigger_value_micro: String(BigInt(Math.round(newTargetUsd * 1e6))),

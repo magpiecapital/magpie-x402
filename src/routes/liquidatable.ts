@@ -1,96 +1,53 @@
 import type { Context } from "hono";
-import { Connection, PublicKey } from "@solana/web3.js";
-import { LENDING_PROGRAM_V1 } from "../lib/magpie-program.js";
-
-const RPC_URL = process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com";
-let _conn: Connection | null = null;
-function conn(): Connection {
-  if (!_conn) _conn = new Connection(RPC_URL, "confirmed");
-  return _conn;
-}
+import {
+  LOAN_SIZE,
+  ACTIVE_STATUS_BYTES_BS58,
+  loanDiscriminatorFilter,
+  fetchLoansAcrossVersions,
+  type DecodedLoan,
+  type ProgramVersion,
+} from "../lib/magpie-program.js";
 
 /**
  * GET /api/v1/markets/liquidatable
  *
- * Lists currently-active loans that are at or past their on-chain
- * due timestamp — i.e. liquidation-eligible *right now* under the
- * protocol's duration gate. Optionally also returns loans approaching
- * due (within ?within_seconds=...) so liquidation-bot agents can
- * pre-position.
+ * Active loans at or past their on-chain due timestamp — liquidation-
+ * eligible right now under the protocol's duration gate. The canonical
+ * liquidation-bot data feed.
  *
- * Why this matters for agents: liquidation is the canonical agent
- * use case in DeFi. A bot that monitors this endpoint and races to
- * call the liquidate ix on-chain captures the liquidator reward.
- * Magpie's anti-exploit gauntlet runs server-side; the liquidate ix
- * itself is permissionless and any wallet can call it.
+ * Multi-version: queries V1 (memecoin) and V3 (RWA) loans by default. V4
+ * loans are EXCLUDED by default — a V4 position auto-sells in-vault as its
+ * exit orders fire, so it rarely reaches a profitable due-date liquidation;
+ * including it would pollute the racer feed with loans that resolve
+ * themselves. Pass ?include_v4=true to opt in (the loans are tagged with
+ * program_version so a bot can decide).
  *
- * Performance:
- *   - Single getProgramAccounts call filtered by dataSize + memcmp
- *     on the status byte (status=0 → active).
- *   - 8s in-process cache (loan state changes on every
- *     borrow/repay/liquidate event; 8s is fresh enough for
- *     liquidation racing without hammering RPC on burst polls).
+ * Each version is fetched independently and decoded through the pool-
+ * separation-safe guard; a failed version is reported in `partial` and
+ * never aborts the others (lane separation).
  *
  * Query params:
- *   - within_seconds: int (default 0). If >0, also include loans
- *     that will become liquidatable within this many seconds.
- *     Useful for pre-positioning; 0 = strictly past-due only.
- *   - limit: int (default 100, max 500). Cap on returned entries.
+ *   - within_seconds: int 0..604800 (default 0). >0 also returns loans that
+ *     become liquidatable within the window (pre-positioning).
+ *   - limit: int 1..500 (default 100).
+ *   - include_v4: 'true' to include V4 loans (default excluded).
  *
- * Free + cached aggressively. Liquidation is a fast-moving game,
- * but charging for the discovery surface would just push agents to
- * scrape RPC directly. We make our money on the *write* side
- * (build-borrow / build-repay) and want maximum agent participation
- * on the read side.
+ * Free + 8s cache. We earn on the write side; the discovery surface stays
+ * open so liquidation racing actually happens.
  */
 
-const BORROWER_OFFSET = 8;
-const STATUS_OFFSET = 122;
-const LOAN_ACCOUNT_SIZE = 123;
-
-interface LiquidatableLoan {
-  loanPda: string;
-  loanId: string;
-  borrower: string;
-  collateralMint: string;
-  loanAmountLamports: string;
-  originalLoanAmountLamports: string;
-  collateralAmount: string;
-  startTimestampUnix: number;
-  dueTimestampUnix: number;
-  ltvPercentage: number;
-  durationDays: number;
+interface LiquidatableLoan extends DecodedLoan {
   secondsPastDue: number; // negative = not yet due
-  status: "active";
-}
-
-function decodeActiveLoan(pda: PublicKey, data: Buffer, nowUnix: number): LiquidatableLoan {
-  const u64 = (o: number) => data.readBigUInt64LE(o).toString();
-  const i64 = (o: number) => Number(data.readBigInt64LE(o));
-  const dueTimestampUnix = i64(112);
-  return {
-    loanPda: pda.toBase58(),
-    borrower: new PublicKey(data.subarray(BORROWER_OFFSET, BORROWER_OFFSET + 32)).toBase58(),
-    collateralMint: new PublicKey(data.subarray(40, 72)).toBase58(),
-    loanId: u64(72),
-    loanAmountLamports: u64(80),
-    originalLoanAmountLamports: u64(88),
-    collateralAmount: u64(96),
-    startTimestampUnix: i64(104),
-    dueTimestampUnix,
-    ltvPercentage: data.readUInt8(120),
-    durationDays: data.readUInt8(121),
-    secondsPastDue: nowUnix - dueTimestampUnix,
-    status: "active",
-  };
 }
 
 interface CacheEntry {
   loans: LiquidatableLoan[];
+  partial: Partial<Record<ProgramVersion, "error">>;
   fetchedAtUnix: number;
   expiresAt: number;
 }
-let cache: CacheEntry | null = null;
+// Separate cache slots for the v4-included vs v4-excluded views.
+const cache = new Map<string, CacheEntry>();
 const CACHE_TTL_MS = 8_000;
 
 export async function liquidatableHandler(c: Context) {
@@ -99,10 +56,7 @@ export async function liquidatableHandler(c: Context) {
   if (withinParam !== undefined) {
     const n = Number(withinParam);
     if (!Number.isFinite(n) || n < 0 || n > 7 * 24 * 3600) {
-      return c.json(
-        { error: "invalid_within_seconds", detail: "must be 0..604800 (7d)" },
-        400,
-      );
+      return c.json({ error: "invalid_within_seconds", detail: "must be 0..604800 (7d)" }, 400);
     }
     withinSeconds = Math.floor(n);
   }
@@ -115,42 +69,48 @@ export async function liquidatableHandler(c: Context) {
     }
     limit = Math.floor(n);
   }
+  const includeV4 = c.req.query("include_v4") === "true";
+  const versions: readonly ProgramVersion[] = includeV4 ? ["v4", "v3", "v1"] : ["v3", "v1"];
+  const cacheKey = includeV4 ? "with_v4" : "no_v4";
 
   const nowUnix = Math.floor(Date.now() / 1000);
 
   let active: LiquidatableLoan[];
-  if (cache && cache.expiresAt > Date.now()) {
-    active = cache.loans.map((l) => ({ ...l, secondsPastDue: nowUnix - l.dueTimestampUnix }));
+  let partial: Partial<Record<ProgramVersion, "error">>;
+  let cacheHit = false;
+  const cached = cache.get(cacheKey);
+
+  if (cached && cached.expiresAt > Date.now()) {
+    active = cached.loans.map((l) => ({ ...l, secondsPastDue: nowUnix - l.dueTimestampUnix }));
+    partial = cached.partial;
+    cacheHit = true;
   } else {
-    try {
-      const accounts = await conn().getProgramAccounts(LENDING_PROGRAM_V1, {
-        commitment: "confirmed",
-        filters: [
-          { dataSize: LOAN_ACCOUNT_SIZE },
-          // bs58 of single 0x00 byte is "1"
-          { memcmp: { offset: STATUS_OFFSET, bytes: "1" } },
-        ],
-      });
-      active = accounts.map(({ pubkey, account }) =>
-        decodeActiveLoan(pubkey, Buffer.from(account.data), nowUnix),
-      );
-      cache = {
-        loans: active,
-        fetchedAtUnix: nowUnix,
-        expiresAt: Date.now() + CACHE_TTL_MS,
-      };
-    } catch (err) {
-      console.warn("[liquidatable] error:", (err as Error).message);
-      return c.json({ error: "loans_fetch_failed" }, 502);
-    }
+    const res = await fetchLoansAcrossVersions(
+      (v) => [
+        { dataSize: LOAN_SIZE[v] },
+        { memcmp: { offset: 195, bytes: ACTIVE_STATUS_BYTES_BS58 } }, // status @195 == Active(0)
+        loanDiscriminatorFilter(),
+      ],
+      { versions },
+    );
+    partial = res.partial;
+    // Defensive: keep only genuinely-active loans (the memcmp already does
+    // this server-side; re-assert after decode so a status-byte collision
+    // can never surface a repaid/liquidated loan as racer bait).
+    active = res.loans
+      .filter((l) => l.status === "active")
+      .map((l) => ({ ...l, secondsPastDue: nowUnix - l.dueTimestampUnix }));
+    cache.set(cacheKey, {
+      loans: active,
+      partial,
+      fetchedAtUnix: nowUnix,
+      expiresAt: Date.now() + CACHE_TTL_MS,
+    });
   }
 
-  // Filter: strictly past-due, or past-due-within window
   const eligible = active.filter((l) => l.secondsPastDue >= -withinSeconds);
-  // Sort: most-past-due first (highest secondsPastDue), pre-positioning loans at the end
   eligible.sort((a, b) => b.secondsPastDue - a.secondsPastDue);
   const trimmed = eligible.slice(0, limit);
-  const truncated = eligible.length > limit;
 
   return c.json(
     {
@@ -158,24 +118,32 @@ export async function liquidatableHandler(c: Context) {
       total_active_loans: active.length,
       eligible_count: eligible.length,
       returned_count: trimmed.length,
-      truncated,
+      truncated: eligible.length > limit,
       within_seconds: withinSeconds,
       limit,
+      versions_queried: versions,
+      v4_included: includeV4,
+      partial,
       loans: trimmed,
       notes: {
         liquidation_ix:
-          "The on-chain liquidate instruction is permissionless. Any wallet can call it on a past-due loan and receive the protocol-defined liquidator reward.",
-        anti_exploit:
-          "The on-chain program enforces correctness; off-chain anti-exploit gates (TWAP/oracle/etc.) apply to borrow flow, not liquidation. Liquidation racing is safe to automate.",
+          "The on-chain liquidate instruction is permissionless. Any wallet can call it on a past-due loan and receive the protocol-defined liquidator reward. Use the loan's program_version to target the correct program.",
+        v4_default_excluded:
+          "V4 (exit-order) loans auto-sell in-vault and rarely reach a profitable due-date liquidation; they are excluded by default. Pass ?include_v4=true to include them.",
         seconds_past_due:
-          "Negative value means the loan is not yet due — included only when within_seconds > 0 for pre-positioning.",
+          "Negative means not yet due — included only when within_seconds > 0 for pre-positioning.",
+        partial:
+          "If a program version's RPC fetch failed, it appears here; the rest of the feed is still valid (lane separation).",
         cache_ttl_seconds: Math.ceil(CACHE_TTL_MS / 1000),
       },
     },
     200,
     {
-      "Cache-Control": "public, max-age=8, s-maxage=8, stale-while-revalidate=12",
-      "X-Cache": cache && cache.expiresAt > Date.now() && cache.fetchedAtUnix !== nowUnix ? "HIT" : "MISS",
+      "Cache-Control":
+        Object.keys(partial).length === 0
+          ? "public, max-age=8, s-maxage=8, stale-while-revalidate=12"
+          : "no-store",
+      "X-Cache": cacheHit ? "HIT" : "MISS",
     },
   );
 }

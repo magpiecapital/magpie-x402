@@ -14,8 +14,8 @@ import { bodyLimit } from "hono/body-limit";
 import { x402Required } from "./middleware/x402.js";
 import { rateLimit } from "./middleware/rate-limit.js";
 import { creditScoreHandler } from "./routes/credit-score.js";
-import { poolHandler } from "./routes/pool.js";
-import { loanHandler } from "./routes/loan.js";
+import { poolHandler, poolsAggregateHandler } from "./routes/pool.js";
+import { loanHandler, loanByPdaHandler } from "./routes/loan.js";
 import { walletLoansHandler } from "./routes/wallet-loans.js";
 import { simulateBorrowHandler } from "./routes/simulate-borrow.js";
 import { buildBorrowHandler } from "./routes/build-borrow.js";
@@ -51,6 +51,13 @@ import {
   cancelLimitCloseHandler,
   listDelegationsHandler,
 } from "./routes/agent-limit-close.js";
+import {
+  armSelfLimitCloseHandler,
+  armBatchSelfLimitCloseHandler,
+  modifySelfLimitCloseHandler,
+  cancelSelfLimitCloseHandler,
+  listSelfLimitCloseHandler,
+} from "./routes/self-limit-close.js";
 import { tokenRiskHandler } from "./routes/token-risk.js";
 import { TIERS } from "./lib/tiers.js";
 
@@ -106,48 +113,73 @@ app.get("/", (c) =>
   c.json({
     name: "magpie-x402",
     version: "0.1.0",
-    description: "x402 payment-required API for the Magpie Capital protocol",
-    docs: "https://github.com/magpiecapital/magpie-x402#readme",
+    tagline:
+      "The first lending protocol an autonomous agent can drive end-to-end — no signup, no API key, no custody.",
+    what_it_is:
+      "Pay per call via x402, get back an UNSIGNED Solana transaction, sign + submit it yourself. The service holds zero keys. An agent runs the entire leveraged-position lifecycle permissionlessly: borrow against a memecoin or RWA, arm its own in-vault take-profit / stop-loss, let it fire (proceeds accrue in a per-loan vault, loan stays active), and repay.",
+    capabilities: {
+      borrow_memecoins: "Borrow SOL against memecoin collateral [program V1].",
+      borrow_rwas:
+        "Borrow SOL against tokenized stocks / RWAs [program V3] — on the V3 equity-track launch (the x402 layer is ready today).",
+      exit_orders:
+        "Arm in-vault take-profit / stop-loss on your OWN loan [program V4] — self-custody, no Telegram, no delegation. Proceeds accrue in a per-loan vault; only a borrower-signed repay releases funds. No other Solana lending tool exposes agent-set TP/SL on a loan.",
+      full_lifecycle:
+        "borrow → arm auto-exit → fire in-vault → repay, every tx agent-signed. A full RCE on this service cannot move your funds.",
+      reads:
+        "On-chain-direct, multi-version (V1/V3/V4) pool / loan / wallet / liquidatable state, each tagged program_version. Free + CDN-cached.",
+      credit_oracle:
+        "Portable ed25519-signed credit attestations other protocols can verify without trusting this API.",
+    },
+    agent_quickstart: {
+      sdk: "npm i @magpieloans/magpie-agent — borrow({ hasExitArming: true }) → armExit({ loanId, target: '2x' }) → repay()",
+      mcp: "npx -y @magpieloans/magpie-mcp — drop-in tools for Claude / Cursor / Windsurf / ChatGPT desktop",
+      examples: "https://github.com/magpiecapital/magpie-x402/tree/main/examples",
+      discovery: "GET /.well-known/x402.json (machine catalog) · GET /openapi.json (OpenAPI 3.1)",
+    },
+    no_custody:
+      "This service holds no keys, signs no user transactions, and cannot move user funds. It verifies x402 payments, builds UNSIGNED txs, and forwards signed envelopes. The on-chain program is the final guard.",
+    pricing: "Free to discover + read. You pay only on the write side (borrow / arm exit / intents).",
     endpoints: {
       free: [
         "GET /health",
-        "GET /.well-known/x402.json",
-        "GET /openapi.json",
-        "GET /api/v1/pool — live on-chain LendingPool state (15s cache)",
+        "GET /.well-known/x402.json — machine-readable endpoint catalog (auto-discovery)",
+        "GET /openapi.json — OpenAPI 3.1 spec",
+        "GET /api/v1/pool?version=v1|v3|v4 — live on-chain LendingPool state (default v1, 15s cache)",
+        "GET /api/v1/pools — all three strategy pools at once, fail-soft per version",
         "GET /api/v1/tiers — protocol tier constants (1h cache)",
-        "GET /api/v1/loan/:loanId — single loan by u64 id",
-        "GET /api/v1/wallet/:wallet/loans — all loans for a wallet (8s cache)",
-        "GET /api/v1/simulate-borrow — preview a loan from caller-supplied prices (free)",
-        "GET /api/v1/collateral/eligible — full collateral catalog (1h cache)",
-        "GET /api/v1/markets/liquidatable — past-due active loans for liquidation bots (8s cache)",
+        "GET /api/v1/loan/by-pda/:loanPda — single loan by PDA, routed to V1/V3/V4 (program_version + V4 exit state)",
+        "GET /api/v1/loan/:loanId?borrower=<pubkey> — loans by borrower + id across versions",
+        "GET /api/v1/wallet/:wallet/loans — every loan a wallet holds across V1/V3/V4 (8s cache)",
+        "GET /api/v1/simulate-borrow — preview a loan from caller-supplied prices",
+        "GET /api/v1/collateral/eligible — collateral catalog + per-token strategy/routing table (1h cache)",
+        "GET /api/v1/markets/liquidatable — past-due V1/V3 loans for liquidation bots (?include_v4=true to add V4; 8s cache)",
         "GET /api/v1/agent/activity — anonymized recent borrow/repay/liquidate events (15s cache)",
         "GET /api/v1/agent/protocol-pulse — 24h aggregate volume + counts (30s cache)",
         "GET /api/v1/agent/leaderboard — top wallets by Magpie credit score (60s cache)",
         "GET /api/v1/agent/lp-state?wallet=<pubkey> — depositor position + pool context (10s cache)",
+        "GET /api/v1/agent/self-limit-close/list?wallet=<pubkey> — your armed in-vault exit orders",
       ],
       paid: [
-        "GET /api/v1/credit-score?wallet=<pubkey> — 0.001 SOL",
+        "GET /api/v1/credit-score?wallet=<pubkey> — 0.001 SOL (public credit oracle)",
         "GET /api/v1/agent/token-risk?mint=<pubkey> — 0.001 SOL (per-token risk profile)",
         "GET /api/v1/agent/credit-attest?wallet=<pubkey> — 0.0005 SOL (signed, portable)",
-        "POST /api/v1/agent/build-borrow — 0.005 SOL (full anti-exploit gate eval)",
+        "POST /api/v1/agent/build-borrow — 0.005 SOL (memecoin→V1 / RWA→V3 / has_exit_arming→V4; full anti-exploit gate)",
+        "POST /api/v1/agent/self-limit-close/arm — 0.001 SOL (arm an in-vault TP/SL on YOUR OWN V4 loan; signed envelope, payer==signer)",
+        "POST /api/v1/agent/self-limit-close/arm-batch — 0.001 SOL (arm a ladder of exits)",
+        "POST /api/v1/agent/self-limit-close/modify — FREE (signed envelope; steer an armed order)",
+        "POST|DELETE /api/v1/agent/self-limit-close/cancel — FREE (signed envelope)",
         "POST /api/v1/agent/build-repay — 0.002 SOL",
         "POST /api/v1/agent/build-extend — 0.002 SOL",
         "POST /api/v1/agent/build-topup — 0.002 SOL",
         "POST /api/v1/agent/build-partial-repay — 0.002 SOL",
-        "POST /api/v1/agent/build-deposit — 0.002 SOL (LP — deposit SOL into the LendingPool)",
-        "POST /api/v1/agent/build-withdraw — 0.002 SOL (LP — withdraw shares)",
+        "POST /api/v1/agent/build-deposit — 0.002 SOL (LP)",
+        "POST /api/v1/agent/build-withdraw — 0.002 SOL (LP)",
         "POST /api/v1/agent/build-liquidate — 0.003 SOL (liquidate a past-due loan, receive keeper bounty)",
         "POST /api/v1/agent/intent — 0.01 SOL (conditional borrow, single payment for lifecycle)",
         "GET /api/v1/agent/intent?id=<intent_id> — 0.0005 SOL",
         "GET /api/v1/agent/intents?wallet=<pubkey> — 0.001 SOL",
-        "POST /api/v1/agent/limit-close — 0.001 SOL (arm a limit-close+sell order against a borrower's loan; borrower must pre-authorize via TG /agent-authorize)",
-        "POST /api/v1/agent/limit-close/preflight — FREE (X-Agent-Pubkey header; dry-run the same arm body to check 'would this succeed?' before paying)",
-        "PATCH /api/v1/agent/limit-close/modify — FREE (X-Agent-Pubkey header; change trigger_value / slippage / dest / expires without re-paying)",
-        "GET /api/v1/agent/limit-close?id=<order_id> — FREE (X-Agent-Pubkey header)",
-        "GET /api/v1/agent/limit-close/list — FREE (X-Agent-Pubkey header)",
-        "GET /api/v1/agent/limit-close/delegations — FREE (X-Agent-Pubkey header; discover authorized wallets + bounds + headroom)",
-        "GET /api/v1/agent/limit-close/eligible-loans — FREE (X-Agent-Pubkey header; per-wallet loan list with explicit eligibility + ineligibility_reasons)",
-        "DELETE /api/v1/agent/limit-close?id=<order_id> — FREE (X-Agent-Pubkey header)",
+        "POST /api/v1/agent/limit-close — 0.001 SOL (delegated: arm against ANOTHER wallet's loan via TG /agent-authorize grant)",
+        "GET /api/v1/agent/limit-close/eligible-loans — FREE (signed Ed25519 envelope, action limit-close-eligible/v1; delegated loans + eligibility)",
       ],
       examples: "https://github.com/magpiecapital/magpie-x402/tree/main/examples",
       mcp_server: "https://github.com/magpiecapital/magpie-x402/tree/main/mcp",
@@ -163,6 +195,11 @@ app.get("/health", (c) => c.json({ ok: true, ts: new Date().toISOString() }));
 // decodes the live LendingPool Anchor account from the canonical
 // program ID. Cached 15s in-process for speed.
 app.get("/api/v1/pool", poolHandler);
+app.get("/api/v1/pools", poolsAggregateHandler);
+// Multi-version loan reads (V1 memecoin / V3 RWA / V4 exit). by-pda is the
+// unambiguous single-loan form; the :loanId form requires ?borrower= because
+// loan PDAs are seeded by borrower and loan_id is per-program.
+app.get("/api/v1/loan/by-pda/:loanPda", loanByPdaHandler);
 app.get("/api/v1/loan/:loanId", loanHandler);
 app.get("/api/v1/wallet/:wallet/loans", walletLoansHandler);
 app.get("/api/v1/simulate-borrow", simulateBorrowHandler);
@@ -206,9 +243,10 @@ app.get("/api/v1/tiers", (c) => c.json({ tiers: Object.values(TIERS) }, 200, {
 app.get("/openapi.json", (c) => c.json({
   openapi: "3.1.0",
   info: {
-    title: "Magpie x402 API",
+    title: "Magpie x402 API — agent-native lending on Solana",
     version: "0.1.0",
-    description: "Pay-per-call API for Magpie Capital's permissionless lending protocol. Solana-native x402 payments.",
+    description:
+      "The first lending protocol an autonomous agent can drive end-to-end (no signup, no API key, no custody). Borrow SOL against memecoins (V1) or tokenized RWAs (V3), arm in-vault take-profit / stop-loss exit orders on your own loan (V4), and repay — all permissionlessly via Solana-native x402 payments. The service holds no keys: it returns unsigned txs you sign yourself. SDK: @magpieloans/magpie-agent · MCP: @magpieloans/magpie-mcp.",
     license: { name: "MIT", identifier: "MIT" },
     contact: { url: "https://github.com/magpiecapital/magpie-x402/issues" },
   },
@@ -216,31 +254,47 @@ app.get("/openapi.json", (c) => c.json({
   paths: {
     "/api/v1/pool": {
       get: {
-        summary: "Live on-chain LendingPool state",
-        description: "Reads the Magpie LendingPool Anchor account directly from the program. 15s in-process cache.",
-        responses: { "200": { description: "Pool state", content: { "application/json": {} } } },
+        summary: "Live on-chain LendingPool state (one strategy)",
+        description: "Reads the LendingPool Anchor account for one program version. ?version=v1 (memecoin, default) | v3 (RWA) | v4 (exit-order). 15s cache.",
+        parameters: [{ name: "version", in: "query", required: false, schema: { type: "string", enum: ["v1", "v3", "v4"], default: "v1" } }],
+        responses: { "200": { description: "Pool state (with program_version)" } },
+      },
+    },
+    "/api/v1/pools": {
+      get: {
+        summary: "All three strategy pools in one call",
+        description: "V1 + V3 + V4 LendingPool state together. Each version is fetched independently; a failed version appears in `partial` and never blanks the others (lane separation).",
+        responses: { "200": { description: "{ pools: { v1, v3, v4 }, partial }" } },
+      },
+    },
+    "/api/v1/loan/by-pda/{loanPda}": {
+      get: {
+        summary: "Fetch a single loan by its PDA (unambiguous, any version)",
+        description: "Decodes the Loan account, routing to V1/V3/V4 purely from the account owner. Returns program_version, category, and (V4) in-vault exit state + exits_supported.",
+        parameters: [{ name: "loanPda", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Loan (with program_version + exits_supported)" }, "404": { description: "Not found" } },
       },
     },
     "/api/v1/loan/{loanId}": {
       get: {
-        summary: "Fetch a single loan by ID",
-        description: "Reads the Loan PDA from the program for the given u64 loan_id.",
-        parameters: [{ name: "loanId", in: "path", required: true, schema: { type: "string", pattern: "^[0-9]+$" } }],
-        responses: {
-          "200": { description: "Loan state" },
-          "404": { description: "Loan not found" },
-        },
+        summary: "Find loans by borrower + loan_id (across versions)",
+        description: "Requires ?borrower= because loan PDAs are seeded by borrower and each program has its own loan_id sequence. Returns a LIST (a borrower can hold the same loan_id in more than one program). For a single unambiguous loan use /api/v1/loan/by-pda/{loanPda}.",
+        parameters: [
+          { name: "loanId", in: "path", required: true, schema: { type: "string", pattern: "^[0-9]+$" } },
+          { name: "borrower", in: "query", required: true, schema: { type: "string" } },
+        ],
+        responses: { "200": { description: "{ count, loans[] } each tagged with program_version" }, "404": { description: "Not found" } },
       },
     },
     "/api/v1/wallet/{wallet}/loans": {
       get: {
-        summary: "All loans owned by a wallet",
-        description: "Single-roundtrip getProgramAccounts + memcmp filter on the borrower offset. Optional ?status=active|repaid|liquidated query filter. 8s cache.",
+        summary: "All loans owned by a wallet, across V1/V3/V4",
+        description: "Fans getProgramAccounts (borrower memcmp @offset 16) across all three lending programs and decodes each through the pool-separation-safe guard. Each loan is tagged with program_version + category + (V4) exit state. A failed version appears in `partial` and never blanks the rest. Optional ?status=active|repaid|liquidated. 8s cache.",
         parameters: [
           { name: "wallet", in: "path", required: true, schema: { type: "string" } },
           { name: "status", in: "query", required: false, schema: { type: "string", enum: ["active", "repaid", "liquidated"] } },
         ],
-        responses: { "200": { description: "Loan list (newest-first)" } },
+        responses: { "200": { description: "{ count, by_version, partial, loans[] } newest-first" } },
       },
     },
     "/api/v1/tiers": {
@@ -319,12 +373,13 @@ app.get("/openapi.json", (c) => c.json({
     "/api/v1/markets/liquidatable": {
       get: {
         summary: "Active loans currently liquidatable (past due)",
-        description: "Sorted most-past-due-first. Optional within_seconds query for pre-positioning. Free — the read surface for liquidation-bot agents.",
+        description: "Multi-version (V1 memecoin + V3 RWA by default). Sorted most-past-due-first; each loan tagged with program_version. V4 (exit-order) loans auto-sell in-vault and are EXCLUDED by default; pass ?include_v4=true to add them. Optional within_seconds for pre-positioning. Free — the read surface for liquidation-bot agents.",
         parameters: [
           { name: "within_seconds", in: "query", required: false, schema: { type: "integer", minimum: 0, maximum: 604800, default: 0 } },
           { name: "limit", in: "query", required: false, schema: { type: "integer", minimum: 1, maximum: 500, default: 100 } },
+          { name: "include_v4", in: "query", required: false, schema: { type: "string", enum: ["true", "false"], default: "false" } },
         ],
-        responses: { "200": { description: "Liquidatable loan list with per-loan seconds_past_due" } },
+        responses: { "200": { description: "Liquidatable loan list with per-loan program_version + seconds_past_due" } },
       },
     },
     "/api/v1/agent/activity": {
@@ -405,21 +460,81 @@ app.get("/openapi.json", (c) => c.json({
         },
       },
     },
+    "/api/v1/agent/build-borrow": {
+      post: {
+        summary: "Build an unsigned borrow tx (paid 0.005 SOL)",
+        description: "Body: { borrower_wallet, collateral_mint, collateral_amount (u64 string), tier (0|1|2), has_exit_arming? }. The borrow is routed by the bot: no-exits+memecoin → V1, no-exits+RWA → V3, has_exit_arming=true → V4 (so the agent can then arm in-vault exit orders on the loan). x402 payer must equal borrower_wallet. The agent signs + submits via the lender-cosign endpoint.",
+        responses: {
+          "200": { description: "partial_signed_tx_b64 + summary (program_id, program_version, loan_id, loan_pda)" },
+          "400": { description: "Validation error (classified for known V4 rejections)" },
+          "402": { description: "Payment Required" },
+          "403": { description: "payer != borrower_wallet" },
+        },
+      },
+    },
+    "/api/v1/agent/self-limit-close/arm": {
+      post: {
+        summary: "Arm an in-vault exit order on YOUR OWN V4 loan (paid 0.001 SOL)",
+        description: "Self-custody agents manage exits on their own loans — no Telegram, no delegation, no custodial keypair. Body is an Ed25519-signed envelope { signedMessageBase64, signatureBase58, signerPubkey } whose signed text carries magpie: limit-close-arm/v1, From (==signer), LoanId, Direction (above=TP / below=SL), the trigger, Nonce, IssuedAt. x402 binds payer==signer; the bot re-verifies the signature, enforces ownership, and enforces exits-are-V4-only. SDK helper builds + signs the envelope for you.",
+        responses: {
+          "200": { description: "Order armed" },
+          "400": { description: "Bad envelope / not a V4 loan (exits_require_v4_loan)" },
+          "402": { description: "Payment Required" },
+          "403": { description: "payer != envelope signer" },
+          "409": { description: "nonce_already_used — the original arm likely succeeded (idempotent)" },
+        },
+      },
+    },
+    "/api/v1/agent/self-limit-close/arm-batch": {
+      post: {
+        summary: "Arm a ladder of exit orders on your own V4 loan (paid 0.001 SOL)",
+        description: "Same signed-envelope auth as /arm (magpie: limit-close-arm-batch/v1). Arms multiple take-profit / stop-loss steps in one call.",
+        responses: { "200": { description: "Batch armed" }, "402": { description: "Payment Required" }, "403": { description: "payer != signer" } },
+      },
+    },
+    "/api/v1/agent/self-limit-close/modify": {
+      post: {
+        summary: "Modify an armed exit on your own loan (free)",
+        description: "Signed envelope (magpie: limit-close-modify/v1, OrderId). Change trigger / slippage / destination / expiry without re-paying — the signature authorizes.",
+        responses: { "200": { description: "Modified" }, "409": { description: "Already firing / not modifiable" } },
+      },
+    },
+    "/api/v1/agent/self-limit-close/cancel": {
+      post: {
+        summary: "Cancel an armed exit on your own loan (free)",
+        description: "Signed envelope (magpie: limit-close-cancel/v1, OrderId). A too-late cancel is a 409 no-op (the engine flipped to firing).",
+        responses: { "200": { description: "Cancelled" }, "409": { description: "Not cancellable" } },
+      },
+    },
+    "/api/v1/agent/self-limit-close/list": {
+      get: {
+        summary: "List your armed exit orders (free)",
+        description: "All armed exit orders for a wallet. Public read of the same data the owner sees in the UI.",
+        parameters: [{ name: "wallet", in: "query", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Armed order list" } },
+      },
+    },
   },
 }));
 
 app.get("/.well-known/x402.json", (c) =>
   c.json({
     scheme: "x402/solana/v1",
+    name: "Magpie — agent-native lending on Solana",
+    description:
+      "The first lending protocol an autonomous agent drives end-to-end, no custody: borrow against memecoins (V1) or RWAs (V3), arm in-vault TP/SL exit orders on your own loan (V4), repay. Pay per call via x402; get back unsigned txs you sign yourself.",
+    docs: "https://github.com/magpiecapital/magpie-x402#readme",
+    sdk: "@magpieloans/magpie-agent",
+    mcp: "@magpieloans/magpie-mcp",
     payTo: PAY_TO ?? null,
     endpoints: [
       {
         method: "GET",
         path: "/api/v1/pool",
-        params: {},
+        params: { version: "optional v1|v3|v4 (default v1) — which strategy's pool" },
         priceLamports: "0",
         priceLabel: "free (15s server cache)",
-        description: "Live on-chain LendingPool state — totalDeposits, totalBorrowed, totalLoansIssued, totalLiquidations, totalFeesEarned. Decoded directly from the Magpie program account.",
+        description: "Live on-chain LendingPool state for one strategy version — totalDeposits, totalBorrowed, totalLoansIssued, totalLiquidations, totalFeesEarned. Use /api/v1/pools for all three at once.",
       },
       {
         method: "GET",
@@ -484,10 +599,11 @@ app.get("/.well-known/x402.json", (c) =>
         params: {
           within_seconds: "optional int — also include loans due within N seconds (0..604800), default 0",
           limit: "optional int — max returned entries (1..500), default 100",
+          include_v4: "optional 'true' — include V4 exit-order loans (excluded by default; they auto-sell in-vault)",
         },
         priceLamports: "0",
         priceLabel: "free (8s cache)",
-        description: "Active loans at or past their on-chain due timestamp — the canonical liquidation-bot data feed. The liquidate ix is permissionless on-chain; any wallet can call it and receive the liquidator reward.",
+        description: "Active V1/V3 loans at or past their on-chain due timestamp — the canonical liquidation-bot data feed, each tagged with program_version. The liquidate ix is permissionless on-chain; any wallet can call it and receive the liquidator reward.",
       },
       {
         method: "GET",
@@ -561,6 +677,64 @@ app.get("/.well-known/x402.json", (c) =>
         priceLamports: "2000000",
         priceLabel: "0.002 SOL per build",
         description: "Build an unsigned LP-withdraw tx for the given shares. Server refuses chunks larger than max_safe_shares (avoids the v1 program's u64 overflow on huge positions). For positions above one safe chunk, withdraw in multiple calls.",
+      },
+      {
+        method: "GET",
+        path: "/api/v1/pools",
+        params: {},
+        priceLamports: "0",
+        priceLabel: "free (15s cache)",
+        description: "All three strategy pools (V1 memecoin / V3 RWA / V4 exit-order) in one call, fail-soft per version.",
+      },
+      {
+        method: "GET",
+        path: "/api/v1/loan/by-pda/{loanPda}",
+        params: { loanPda: "Solana pubkey (base58) of the loan PDA" },
+        priceLamports: "0",
+        priceLabel: "free (10s cache)",
+        description: "Single loan by PDA, routed to V1/V3/V4 from the account owner. Returns program_version, category, V4 in-vault exit state, and exits_supported.",
+      },
+      {
+        method: "GET",
+        path: "/api/v1/wallet/{wallet}/loans",
+        params: { wallet: "Solana pubkey (base58)", status: "optional active|repaid|liquidated" },
+        priceLamports: "0",
+        priceLabel: "free (8s cache)",
+        description: "Every loan a wallet holds across V1/V3/V4, each tagged with program_version + category + (V4) exit state. Fail-soft per version (a failed version appears in `partial`).",
+      },
+      {
+        method: "POST",
+        path: "/api/v1/agent/build-borrow",
+        params: {
+          borrower_wallet: "Solana pubkey",
+          collateral_mint: "Solana mint",
+          collateral_amount: "u64 string",
+          tier: "0|1|2",
+          has_exit_arming: "optional boolean — true routes the borrow to V4 so exit orders can be armed on the loan",
+        },
+        priceLamports: "5000000",
+        priceLabel: "0.005 SOL per build",
+        description: "Build an unsigned borrow tx. Routed by the bot: no-exits+memecoin → V1, no-exits+RWA → V3, has_exit_arming → V4. x402 payer must equal borrower_wallet.",
+      },
+      {
+        method: "POST",
+        path: "/api/v1/agent/self-limit-close/arm",
+        params: {
+          signedMessageBase64: "base64 of the Ed25519-signed envelope (magpie: limit-close-arm/v1; From==signer; LoanId; Direction above=TP/below=SL; trigger; Nonce; IssuedAt)",
+          signatureBase58: "base58 ed25519 signature",
+          signerPubkey: "Solana pubkey (== loan owner == x402 payer)",
+        },
+        priceLamports: "1000000",
+        priceLabel: "0.001 SOL per arm",
+        description: "Arm an in-vault take-profit / stop-loss exit on YOUR OWN V4 loan. Self-custody; no Telegram, no delegation, no custodial keypair. x402 binds payer==signer; the bot enforces ownership + exits-are-V4-only. Free /modify, /cancel, /list companions.",
+      },
+      {
+        method: "GET",
+        path: "/api/v1/agent/self-limit-close/list",
+        params: { wallet: "Solana pubkey (base58)" },
+        priceLamports: "0",
+        priceLabel: "free",
+        description: "List the armed in-vault exit orders for a wallet.",
       },
     ],
     contact: "https://github.com/magpiecapital/magpie-x402/issues",
@@ -789,9 +963,16 @@ if (PAY_TO) {
   // the 1% execution fee on fire is where the protocol earns the
   // real value (a fee on the proceeds, not on the arm).
   //
-  // Read / list / cancel are FREE so agents can manage their
-  // pipeline without being taxed. Scoping by X-Agent-Pubkey
-  // header keeps an agent from peeking at competitors' orders.
+  // Read / list / cancel / preflight / modify / delegations /
+  // eligible-loans are FREE so agents can manage their pipeline
+  // without being taxed. Each is scoped by the verified signer of a
+  // signed Ed25519 envelope (headers X-Magpie-Env-Msg / -Sig /
+  // -Signer, per-action magpie: limit-close-*/v1 binding, OrderId
+  // bound for order-scoped ops) — NOT a self-asserted X-Agent-Pubkey
+  // header. Agent pubkeys are public, so the prior header-trust let
+  // anyone disarm another agent's stop-loss; the signature now proves
+  // control of the key and keeps an agent from touching competitors'
+  // orders. (audit 2026-06-21, HIGH)
   app.post(
     "/api/v1/agent/limit-close",
     x402Required({
@@ -814,6 +995,40 @@ if (PAY_TO) {
   app.get("/api/v1/agent/limit-close/delegations", listDelegationsHandler);
   app.get("/api/v1/agent/limit-close/eligible-loans", listEligibleLoansHandler);
   app.delete("/api/v1/agent/limit-close", cancelLimitCloseHandler);
+
+  // ── Self-owned exit orders (loan OWNER arms exits on its OWN V4 loan) ──
+  // The caller IS the borrower: a self-custody agent that opened a V4 loan
+  // (build-borrow with has_exit_arming=true) manages its own in-vault auto-
+  // sell exits via an Ed25519-signed envelope — no TG, no delegation, no
+  // custodial keypair. The signature authorizes; x402 binds payer==signer on
+  // the paid arms and forwards to the bot's signature-gated site surface.
+  // V4-only + ownership are enforced bot-side (V4_EXIT_EXCLUSIVE_ENFORCE).
+  app.post(
+    "/api/v1/agent/self-limit-close/arm",
+    x402Required({
+      payTo: PAY_TO,
+      amountLamports: 1_000_000n, // 0.001 SOL per arm (matches delegation arm)
+      label: "Magpie self limit-close arm",
+      docsUrl: "https://github.com/magpiecapital/magpie-x402#self-limit-close",
+    }),
+    armSelfLimitCloseHandler,
+  );
+  app.post(
+    "/api/v1/agent/self-limit-close/arm-batch",
+    x402Required({
+      payTo: PAY_TO,
+      amountLamports: 1_000_000n, // 0.001 SOL per batch arm
+      label: "Magpie self limit-close arm-batch",
+      docsUrl: "https://github.com/magpiecapital/magpie-x402#self-limit-close",
+    }),
+    armBatchSelfLimitCloseHandler,
+  );
+  // Free management — the agent already paid to arm; steering its own
+  // orders (signature-authorized) isn't taxed.
+  app.post("/api/v1/agent/self-limit-close/modify", modifySelfLimitCloseHandler);
+  app.delete("/api/v1/agent/self-limit-close/cancel", cancelSelfLimitCloseHandler);
+  app.post("/api/v1/agent/self-limit-close/cancel", cancelSelfLimitCloseHandler);
+  app.get("/api/v1/agent/self-limit-close/list", listSelfLimitCloseHandler);
 } else {
   // Surfaces a clear "service misconfigured" error instead of a silent
   // 404 when MAGPIE_PAY_TO isn't set in the environment.

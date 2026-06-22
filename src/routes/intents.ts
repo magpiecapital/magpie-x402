@@ -97,7 +97,7 @@ async function forward(c: Context, url: string, init: RequestInit) {
   const text = await res.text();
   let parsed: unknown;
   try { parsed = JSON.parse(text); }
-  catch { parsed = { error: "bot_returned_non_json", raw: text.slice(0, 500) }; }
+  catch { parsed = { error: "bot_returned_non_json", status: res.status }; }
   return c.json(parsed as Record<string, unknown>, res.status as never);
 }
 

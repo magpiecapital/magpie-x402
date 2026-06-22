@@ -13,6 +13,15 @@ import { PublicKey } from "@solana/web3.js";
  * the magpie-credit-oracle program), but the API surface is paid
  * to fund infrastructure + prevent abuse.
  *
+ * DELIBERATE: this endpoint does NOT bind payer==wallet (unlike build-*).
+ * It is a PUBLIC CREDIT ORACLE by design — its whole product purpose is to
+ * let OTHER protocols/agents look up ANY wallet's Magpie creditworthiness
+ * (the score is public-derivable from on-chain repayment history, so this
+ * leaks no private data). Per-wallet binding would break that product. A
+ * security review (2026-06-20) flagged the missing binding; it is
+ * intentional and the payment + cache + rate-limit bound abuse. If the
+ * product later wants owner-only scores, add enforcePayerMatchesWallet here.
+ *
  * Production wiring (TODO): connect MAGPIE_DB_READONLY_URL and pull
  * the real score. For now returns a deterministic placeholder so the
  * x402 plumbing can be exercised end-to-end before DB credentials are

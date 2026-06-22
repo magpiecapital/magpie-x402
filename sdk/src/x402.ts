@@ -62,7 +62,7 @@ export async function paidCall<T = unknown>(
   ctx: X402Context,
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
   path: string,
-  init: { query?: Record<string, string>; body?: unknown } = {},
+  init: { query?: Record<string, string>; body?: unknown; headers?: Record<string, string> } = {},
 ): Promise<PaidCallResult<T>> {
   const fetcher = ctx.fetcher ?? fetch;
   const url = new URL(path, ctx.baseUrl);
@@ -70,7 +70,7 @@ export async function paidCall<T = unknown>(
     url.searchParams.set(k, v);
   }
 
-  const headers: Record<string, string> = { Accept: "application/json" };
+  const headers: Record<string, string> = { Accept: "application/json", ...(init.headers ?? {}) };
   if (init.body !== undefined) headers["Content-Type"] = "application/json";
 
   const first = await fetcher(url, {
@@ -153,7 +153,8 @@ export async function freeGet<T = unknown>(
   ctx: X402Context,
   path: string,
   query: Record<string, string> = {},
+  headers: Record<string, string> = {},
 ): Promise<T> {
-  const result = await paidCall<T>(ctx, "GET", path, { query });
+  const result = await paidCall<T>(ctx, "GET", path, { query, headers });
   return result.data;
 }

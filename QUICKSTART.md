@@ -127,6 +127,37 @@ You just built and ran a Magpie agent. Total time: 10 minutes. Total code: 28 li
 
 ## Going further
 
+### Arm an in-vault exit order (take-profit / stop-loss)
+
+Borrow on the V4 in-vault program (`hasExitArming: true`), then arm a take-profit / stop-loss that fires **in-vault** — proceeds accumulate on the loan, and the only path back to your wallet is your own borrower-signed repay. The order is self-owned: the SDK signs an Ed25519 envelope with the *same* keypair that pays, so no Telegram, delegation, or custodial key is involved.
+
+```js
+// Borrow on V4 so the loan can hold exit orders.
+const loan = await agent.borrow({
+  collateralMint: COLLATERAL_MINT,
+  collateralAmount: COLLATERAL_AMOUNT_RAW,
+  tier: "express",
+  hasExitArming: true,
+});
+
+// Arm a take-profit at 2x (paid 0.001 SOL). Supply exactly ONE trigger:
+// target ("2x"/"0.7x"), priceUsd, mcUsd ("5M"/"1.2B"), or trailingBps (SL only).
+const tp = await agent.armExit({
+  loanId: loan.loanId,
+  direction: "above",   // take-profit (default); use "below" for a stop-loss
+  target: "2x",
+  slippageBps: 100,
+  dest: "sol",          // sol | usdc
+});
+
+// List, modify, or cancel any time (list/modify/cancel are free).
+const { orders } = await agent.listExits();
+await agent.modifyExit({ orderId: tp.order.order_id, target: "3x" });
+// await agent.cancelExit(tp.order.order_id);
+```
+
+When you're done, repay the loan (borrower-signed, via the site/bot) to release the collateral plus any in-vault SOL proceeds back to your wallet.
+
 ### Conditional borrows with push notifications
 
 For a long-running agent that should react to market conditions, use intents with webhooks. The agent doesn't need to be online — Magpie posts the matched intent to your webhook URL when the trigger fires.

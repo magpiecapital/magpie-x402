@@ -19,6 +19,14 @@ import { PublicKey } from "@solana/web3.js";
  *
  * Implementation: thin proxy to magpie-bot's
  * /api/v1/agent/credit-attest, which holds the lender signing key.
+ *
+ * DELIBERATE: like /credit-score, this does NOT bind payer==wallet. The
+ * attestation signs a PUBLIC, on-chain-derivable score; the product purpose
+ * is exactly that a THIRD party (another protocol) can fetch + verify a
+ * wallet's Magpie creditworthiness. The signature can't be used to
+ * impersonate the wallet (it proves a score, not key ownership). A 2026-06-20
+ * security review flagged the missing binding; it is intentional. Add
+ * enforcePayerMatchesWallet here only if the product pivots to owner-only.
  */
 
 const BOT_API = process.env.MAGPIE_BOT_API || "https://api.magpie.capital";

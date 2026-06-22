@@ -1,86 +1,56 @@
 import type { Context } from "hono";
-import { Connection, PublicKey } from "@solana/web3.js";
-import { LENDING_PROGRAM_V1 } from "../lib/magpie-program.js";
-
-const RPC_URL = process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com";
-let _conn: Connection | null = null;
-function conn(): Connection {
-  if (!_conn) _conn = new Connection(RPC_URL, "confirmed");
-  return _conn;
-}
+import { PublicKey } from "@solana/web3.js";
+import {
+  LOAN_SIZE,
+  LOAN_VERSIONS,
+  loanDiscriminatorFilter,
+  fetchLoansAcrossVersions,
+  type DecodedLoan,
+  type ProgramVersion,
+} from "../lib/magpie-program.js";
 
 /**
  * GET /api/v1/wallet/:wallet/loans
  *
- * Returns every Loan account owned by a wallet, fetched directly via
- * getProgramAccounts with a memcmp filter on the `borrower` offset.
- * This is THE canonical "show me what positions this wallet has" call
- * — what agents will hit for credit-decisioning, portfolio dashboards,
- * risk modeling.
+ * Every loan a wallet holds, ACROSS ALL THREE lending strategies:
+ *   - V1 memecoin loans
+ *   - V3 RWA loans
+ *   - V4 in-vault exit-order loans
  *
- * Performance characteristics:
- *   - Single RPC roundtrip via getProgramAccounts + memcmp filter
- *   - 8s cache per wallet (loans change on borrow/repay/liquidate)
- *   - Returns parsed loan summaries, NOT raw account data → smaller
- *     payloads, faster JSON serialize
+ * Each version is queried independently (getProgramAccounts + a borrower
+ * memcmp at offset 16) and decoded through the pool-separation-safe guard,
+ * so a loan from one program can never be misattributed to another. If one
+ * version's RPC call fails, the others still return — the failed version is
+ * reported in `partial` rather than blanking the whole portfolio view (lane
+ * separation).
  *
- * Privacy: this is on-chain data — anyone with the wallet pubkey
- * can query the same info from any RPC. Exposing it through this
- * endpoint adds convenience (one call instead of N pdas) but no
- * new privacy surface.
+ * Privacy: on-chain data — anyone with the wallet pubkey can derive the same
+ * from any RPC. This endpoint is convenience (one call vs three), not a new
+ * privacy surface.
  */
 
-// Loan account layout — must match decode in routes/loan.ts.
-// `borrower` lives at offset 8 (after the 8-byte Anchor discriminator).
-const BORROWER_OFFSET = 8;
-const LOAN_ACCOUNT_SIZE = 123; // exact size of the Anchor Loan struct
-
-interface LoanSummary {
-  loanPda: string;
-  loanId: string;
-  collateralMint: string;
-  loanAmountLamports: string;
-  originalLoanAmountLamports: string;
-  collateralAmount: string;
-  startTimestampUnix: number;
-  dueTimestampUnix: number;
-  ltvPercentage: number;
-  durationDays: number;
-  status: "active" | "repaid" | "liquidated" | "unknown";
-}
-
-function decodeLoanSummary(pda: PublicKey, data: Buffer): LoanSummary {
-  const u64 = (o: number) => data.readBigUInt64LE(o).toString();
-  const i64 = (o: number) => Number(data.readBigInt64LE(o));
-  const statusByte = data.readUInt8(122);
-  return {
-    loanPda: pda.toBase58(),
-    collateralMint: new PublicKey(data.subarray(40, 72)).toBase58(),
-    loanId: u64(72),
-    loanAmountLamports: u64(80),
-    originalLoanAmountLamports: u64(88),
-    collateralAmount: u64(96),
-    startTimestampUnix: i64(104),
-    dueTimestampUnix: i64(112),
-    ltvPercentage: data.readUInt8(120),
-    durationDays: data.readUInt8(121),
-    status:
-      statusByte === 0 ? "active" :
-      statusByte === 1 ? "repaid" :
-      statusByte === 2 ? "liquidated" : "unknown",
-  };
-}
-
-// Per-wallet cache. 8s TTL keeps us fresh during active borrow/repay
-// flows without hammering RPC.
-const walletCache = new Map<string, { loans: LoanSummary[]; expiresAt: number }>();
+// Per-wallet cache. 8s TTL for complete results. Partial results (a version
+// errored) are cached for a SHORT TTL so a sustained version outage can't be
+// abused to force 3x getProgramAccounts on every request (RPC amplification),
+// while still letting a recovered version reappear within a couple seconds.
+const walletCache = new Map<
+  string,
+  { loans: DecodedLoan[]; partial: Partial<Record<ProgramVersion, "error">>; expiresAt: number }
+>();
 const WALLET_TTL_MS = 8_000;
+const PARTIAL_TTL_MS = 2_500;
+
+const STATUS_FILTERS = ["active", "repaid", "liquidated"] as const;
+
+function byVersionCounts(loans: DecodedLoan[]): Record<ProgramVersion, number> {
+  const out = { v1: 0, v3: 0, v4: 0 } as Record<ProgramVersion, number>;
+  for (const l of loans) out[l.programVersion]++;
+  return out;
+}
 
 export async function walletLoansHandler(c: Context) {
   const walletParam = c.req.param("wallet");
-  if (!walletParam) {
-    return c.json({ error: "missing_wallet" }, 400);
-  }
+  if (!walletParam) return c.json({ error: "missing_wallet" }, 400);
   let walletKey: PublicKey;
   try {
     walletKey = new PublicKey(walletParam);
@@ -88,58 +58,61 @@ export async function walletLoansHandler(c: Context) {
     return c.json({ error: "invalid_wallet_pubkey" }, 400);
   }
 
-  // Optional query filter: ?status=active|repaid|liquidated
   const statusFilter = c.req.query("status");
-  if (statusFilter && !["active", "repaid", "liquidated"].includes(statusFilter)) {
-    return c.json({ error: "invalid_status_filter" }, 400);
+  if (statusFilter && !STATUS_FILTERS.includes(statusFilter as (typeof STATUS_FILTERS)[number])) {
+    return c.json({ error: "invalid_status_filter", valid: STATUS_FILTERS }, 400);
   }
 
-  const cacheKey = walletKey.toBase58();
-  const cached = walletCache.get(cacheKey);
+  const wallet = walletKey.toBase58();
+
+  // Serve from cache (complete results only).
+  const cached = walletCache.get(wallet);
+  let loans: DecodedLoan[];
+  let partial: Partial<Record<ProgramVersion, "error">> = {};
+  let cacheHit = false;
+
   if (cached && cached.expiresAt > Date.now()) {
-    const filtered = statusFilter
-      ? cached.loans.filter((l) => l.status === statusFilter)
-      : cached.loans;
-    return c.json(
-      { wallet: cacheKey, count: filtered.length, loans: filtered },
-      200,
-      {
-        "Cache-Control": "public, max-age=8, s-maxage=8, stale-while-revalidate=15",
-        "X-Cache": "HIT",
-      },
-    );
-  }
-
-  try {
-    // memcmp on the borrower field — server-side filter on the RPC
-    // node. Returns ONLY accounts where bytes[8..40] match the wallet.
-    const accounts = await conn().getProgramAccounts(LENDING_PROGRAM_V1, {
-      commitment: "confirmed",
-      filters: [
-        { dataSize: LOAN_ACCOUNT_SIZE },
-        { memcmp: { offset: BORROWER_OFFSET, bytes: walletKey.toBase58() } },
-      ],
-    });
-    const loans = accounts.map(({ pubkey, account }) =>
-      decodeLoanSummary(pubkey, Buffer.from(account.data)),
-    );
-    // Sort newest-first by loan_id (it's monotonically issued on-chain)
+    loans = cached.loans;
+    partial = cached.partial;
+    cacheHit = true;
+  } else {
+    const res = await fetchLoansAcrossVersions((v) => [
+      { dataSize: LOAN_SIZE[v] },
+      { memcmp: { offset: 16, bytes: wallet } }, // borrower @ offset 16
+      loanDiscriminatorFilter(),
+    ]);
+    loans = res.loans;
+    partial = res.partial;
+    // newest-first by on-chain loan_id (monotonic), independent of version
     loans.sort((a, b) => (BigInt(b.loanId) > BigInt(a.loanId) ? 1 : -1));
-    walletCache.set(cacheKey, { loans, expiresAt: Date.now() + WALLET_TTL_MS });
-
-    const filtered = statusFilter
-      ? loans.filter((l) => l.status === statusFilter)
-      : loans;
-    return c.json(
-      { wallet: cacheKey, count: filtered.length, loans: filtered },
-      200,
-      {
-        "Cache-Control": "public, max-age=8, s-maxage=8, stale-while-revalidate=15",
-        "X-Cache": "MISS",
-      },
-    );
-  } catch (err) {
-    console.warn("[wallet-loans] error:", (err as Error).message);
-    return c.json({ error: "wallet_loans_fetch_failed" }, 502);
+    const isPartial = Object.keys(partial).length > 0;
+    walletCache.set(wallet, {
+      loans,
+      partial,
+      expiresAt: Date.now() + (isPartial ? PARTIAL_TTL_MS : WALLET_TTL_MS),
+    });
   }
+
+  const filtered = statusFilter ? loans.filter((l) => l.status === statusFilter) : loans;
+
+  return c.json(
+    {
+      wallet,
+      count: filtered.length,
+      by_version: byVersionCounts(filtered),
+      // Which versions (if any) failed to fetch this request. Empty = all good.
+      partial,
+      versions_queried: LOAN_VERSIONS,
+      loans: filtered,
+    },
+    200,
+    {
+      // Don't let a CDN cache a partial response.
+      "Cache-Control":
+        Object.keys(partial).length === 0
+          ? "public, max-age=8, s-maxage=8, stale-while-revalidate=15"
+          : "no-store",
+      "X-Cache": cacheHit ? "HIT" : "MISS",
+    },
+  );
 }

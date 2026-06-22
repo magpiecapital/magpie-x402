@@ -1,0 +1,47 @@
+# Smithery registry manifest for @magpieloans/magpie-mcp
+# https://smithery.ai — makes the Magpie x402 MCP server one-click installable
+# from any MCP host (Claude Desktop, Cursor, Windsurf, ChatGPT desktop, …).
+#
+# Free read tools (pool/loan/wallet/liquidatable state, simulate-borrow,
+# collateral catalog, credit score) work with no keypair. Paid write tools
+# (borrow, arm in-vault exits, intents, LP) require a local Solana keypair
+# whose path you supply via payerKeypairPath — the key never leaves the host.
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties:
+      solanaRpcUrl:
+        type: string
+        title: Solana RPC URL
+        default: "https://api.mainnet-beta.solana.com"
+        description: >-
+          Solana RPC endpoint. Use a paid Helius/Triton/QuickNode URL for
+          production traffic — the public mainnet-beta endpoint rate-limits.
+      magpieX402BaseUrl:
+        type: string
+        title: Magpie x402 base URL
+        default: "https://x402.magpie.capital"
+        description: The Magpie x402 service base URL (override only for self-hosting).
+      payerKeypairPath:
+        type: string
+        title: Payer keypair path (optional)
+        description: >-
+          Optional path to a Solana keypair JSON (id.json format) to enable PAID
+          tools (borrow / arm-exit / intents / LP). The key signs locally and
+          never leaves your machine. Omit it to run free read-only tools.
+    required: []
+  commandFunction: |-
+    (config) => ({
+      command: 'magpie-mcp',
+      args: [],
+      env: Object.assign(
+        {
+          SOLANA_RPC_URL: config.solanaRpcUrl || 'https://api.mainnet-beta.solana.com',
+          MAGPIE_X402_BASE_URL: config.magpieX402BaseUrl || 'https://x402.magpie.capital',
+        },
+        config.payerKeypairPath ? { MAGPIE_MCP_PAYER_KEYPAIR: config.payerKeypairPath } : {}
+      ),
+    })
+build:
+  dockerfile: null
