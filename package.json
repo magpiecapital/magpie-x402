@@ -31,7 +31,7 @@
     "url": "git+https://github.com/magpiecapital/magpie-x402.git"
   },
   "dependencies": {
-    "@hono/node-server": "^1.13.0",
+    "@hono/node-server": "^2.0.5",
     "@noble/curves": "^1.9.7",
     "@solana/web3.js": "^1.95.0",
     "dotenv": "^16.4.5",
