@@ -534,6 +534,13 @@ app.get("/.well-known/x402.json", (c) =>
     sdk: "@magpieloans/magpie-agent",
     mcp: "@magpieloans/magpie-mcp",
     payTo: PAY_TO ?? null,
+    tokenomics: {
+      symbol: "$MAGPIE",
+      mint: "9UuLsJ3jf8ViBNeRcwXD53re5G3ypgfKK3s2EiMMpump",
+      chain: "solana",
+      fee_share:
+        "70% of x402 protocol fees are distributed to $MAGPIE holders. Every agent borrow / arm-exit / intent call here accrues fees, and 70% of them flow back to the token — agent adoption of this API directly rewards $MAGPIE holders.",
+    },
     endpoints: [
       {
         method: "GET",
