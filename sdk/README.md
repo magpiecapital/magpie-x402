@@ -247,7 +247,9 @@ For a paranoid first deployment, fund the keypair with a small SOL float (0.05 S
 
 ```ts
 new MagpieAgent({
-  keypair,                                            // required for paid actions
+  keypair,                                            // raw Keypair — the SDK signs locally
+  // — or —
+  signer,                                             // external wallet (see below); takes precedence
   rpcUrl: "https://api.mainnet-beta.solana.com",      // any Solana RPC
   baseUrl: "https://x402.magpie.capital",             // default; override for self-hosted
   siteUrl: "https://www.magpie.capital",              // default; cosign-borrow host
@@ -255,6 +257,24 @@ new MagpieAgent({
 ```
 
 For production traffic, use a paid Helius/Triton/QuickNode URL — the default public RPC will rate-limit you.
+
+### Bring your own wallet (Privy / Turnkey / SendAI BaseWallet / embedded)
+
+Agent frameworks usually keep the key in a wallet service and **never** expose a raw `Keypair`. Pass a `signer` instead — any object that implements three methods:
+
+```ts
+interface MagpieSigner {
+  publicKey: PublicKey;
+  signTransaction<T>(tx: T): Promise<T>;     // sign in the wallet's own environment
+  signMessage(message: Uint8Array): Promise<Uint8Array>;  // 64-byte Ed25519 sig (for exit envelopes)
+}
+
+// Example: a SendAI / Solana Agent Kit BaseWallet, a Privy server wallet, a
+// Turnkey signer — anything matching the shape above works unchanged.
+const agent = new MagpieAgent({ signer: myWallet, rpcUrl });
+```
+
+The secret key stays inside the wallet service — the SDK only ever calls `signTransaction` / `signMessage` and never touches raw key bytes. Everything else (borrow, repay, arm/modify/cancel exits, paid x402 calls) works identically; `signer` and `keypair` are interchangeable.
 
 ## What's next on the roadmap
 
