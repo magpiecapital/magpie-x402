@@ -2,6 +2,12 @@ import type { Context, MiddlewareHandler } from "hono";
 import { PublicKey } from "@solana/web3.js";
 import { verifyPayment } from "../lib/solana.js";
 import { mintNonce, verifyNonce, NONCE_TTL_MS } from "../lib/hmac-nonce.js";
+import {
+  settleStandardSplPayment,
+  standardRailEnabled,
+  buildSplAccepts,
+  getSvmFeePayer,
+} from "../lib/x402-standard.js";
 
 /**
  * x402 — HTTP 402 Payment Required middleware (Solana, HMAC-nonces).
@@ -59,48 +65,69 @@ export function x402Required(config: X402Config): MiddlewareHandler {
   }
 
   return async (c: Context, next) => {
-    const paymentHeader = c.req.header("x-payment");
     const endpoint = c.req.path;
+    // Lane discrimination by HEADER NAME (cannot collide):
+    //   native rail  → x-payment (bare base58 signature)
+    //   standard rail → PAYMENT-SIGNATURE (base64 PaymentPayload)
+    const paymentHeader = c.req.header("x-payment");
+    const stdSig = c.req.header("payment-signature");
+    // Let browser/agent clients read the standard headers.
+    c.header("Access-Control-Expose-Headers", "PAYMENT-REQUIRED, PAYMENT-SIGNATURE, PAYMENT-RESPONSE");
 
-    // ── No payment supplied — return signed challenge ──
+    // ── Standard x402 v2 SVM rail (gated, fail-closed) ──
+    // Only when explicitly enabled (X402_STANDARD_RAIL_ENABLED=true) AND the
+    // client used the standard header. Settles USDC/wSOL via the facilitator;
+    // the service holds no keys. On ANY failure this returns a 402 (fail closed).
+    if (stdSig && standardRailEnabled()) {
+      const result = await settleStandardSplPayment(c, {
+        endpoint,
+        amountLamports: config.amountLamports,
+        v2Sig: stdSig,
+      });
+      if (!result.ok) return result.res;
+      // Propagate the SPL transfer authority so enforcePayerMatchesWallet still gates per-wallet routes.
+      c.set("x402", { signature: "spl", nonce: "", payer: result.payer, mintedAtMs: Date.now() });
+      await next();
+      return;
+    }
+
+    // ── No payment supplied — return challenge ──
     if (!paymentHeader) {
       const nonce = mintNonce(endpoint);
       const memo = `magpie-x402:${nonce}`;
-      return c.json(
-        {
-          // ── Standard x402 conformance (additive) ──
-          // The official x402 PaymentRequired schema (x402Version + accepts[])
-          // is what every standard x402 client library + discovery index
-          // (402index, x402scan, CDP Bazaar, …) validates against. Without it,
-          // a standard agent gets a 402 it can't parse and the indexes won't
-          // list us — the real blocker to agent discovery. We emit BOTH the
-          // standard fields AND our original custom fields below, so our own
-          // SDK/MCP keep working byte-for-byte while standard agents can now
-          // parse + discover us. Settlement is native-SOL + memo (described in
-          // accepts[0].extra) rather than the SPL/"exact" default — sophisticated
-          // clients read extra; full SPL-settlement interop is a separate change.
-          x402Version: 1,
-          accepts: [
-            {
-              scheme: "exact",
-              network: "solana",
-              maxAmountRequired: config.amountLamports.toString(),
-              resource: c.req.url,
+      const headers: Record<string, string> = {
+        "X-Payment-Required-Scheme": "x402/solana/v1",
+        "X-Payment-Required-Amount": config.amountLamports.toString(),
+        "X-Payment-Required-Recipient": payToKey.toBase58(),
+        "X-Payment-Required-Nonce": nonce,
+        "X-Payment-Required-Memo": memo,
+      };
+      // Standard x402 v2 PaymentRequired — ONLY advertised when the SPL rail is
+      // actually live + the facilitator feePayer is known. We never advertise a
+      // settlement we can't honor (that would make standard agents pay + fail).
+      let standardBody: Record<string, unknown> = {};
+      if (standardRailEnabled()) {
+        const fp = await getSvmFeePayer();
+        if (fp) {
+          const v2 = {
+            x402Version: 2,
+            error: "payment_required",
+            resource: {
+              url: c.req.url,
               description: config.label ?? "Magpie x402 paid endpoint",
               mimeType: "application/json",
-              payTo: payToKey.toBase58(),
-              maxTimeoutSeconds: Math.round(NONCE_TTL_MS / 1000),
-              asset: "So11111111111111111111111111111111111111112",
-              extra: {
-                settlement: "native-sol",
-                memo,
-                note:
-                  "Transfer maxAmountRequired lamports of NATIVE SOL to payTo " +
-                  'with this memo, then retry with header "X-Payment: <tx_signature>".',
-              },
             },
-          ],
-          // ── Original Magpie custom fields (unchanged — our SDK/MCP read these) ──
+            accepts: buildSplAccepts(config.amountLamports, memo, fp.feePayer),
+            extensions: {},
+          };
+          standardBody = v2;
+          headers["PAYMENT-REQUIRED"] = Buffer.from(JSON.stringify(v2)).toString("base64");
+        }
+      }
+      return c.json(
+        {
+          ...standardBody,
+          // ── Magpie native custom fields (unchanged — our SDK/MCP read these) ──
           error: "payment_required",
           scheme: "x402/solana/v1",
           payTo: payToKey.toBase58(),
@@ -117,17 +144,11 @@ export function x402Required(config: X402Config): MiddlewareHandler {
             `with memo "${memo}", then retry with header X-Payment: <tx_signature>`,
         },
         402,
-        {
-          "X-Payment-Required-Scheme": "x402/solana/v1",
-          "X-Payment-Required-Amount": config.amountLamports.toString(),
-          "X-Payment-Required-Recipient": payToKey.toBase58(),
-          "X-Payment-Required-Nonce": nonce,
-          "X-Payment-Required-Memo": memo,
-        },
+        headers,
       );
     }
 
-    // ── Payment supplied — verify ──
+    // ── Native payment supplied — verify (UNCHANGED native rail) ──
     const sig = paymentHeader.trim();
     if (!/^[1-9A-HJ-NP-Za-km-z]{64,90}$/.test(sig)) {
       return c.json({ error: "invalid_payment_format" }, 402);
