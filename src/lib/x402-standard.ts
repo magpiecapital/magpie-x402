@@ -388,21 +388,26 @@ export async function settleStandardSplPayment(
   // time out AFTER the agent's money already moved (charged-but-denied). 40s
   // fits inside the 60s function maxDuration (vercel.json) + the 60s nonce window.
   const s = (await facilitator("settle", { x402Version: 2, paymentPayload: payload, paymentRequirements: reqd }, 40000)) as SettleResponse | null;
-  if (!s || s.success !== true || !s.signature) return fail(402, { error: "settle_failed", reason: s?.errorReason ?? "no_settlement" });
+  // The x402 v2 SVM SettlementResponse carries the on-chain tx SIGNATURE in the
+  // `transaction` field (PayAI + the standard); some facilitators name it
+  // `signature`. Accept either — reading only `signature` silently dropped every
+  // successful PayAI settlement (→ false "no_settlement" while money moved).
+  const sig = (s?.transaction || s?.signature || "").trim();
+  if (!s || s.success !== true || !sig) return fail(402, { error: "settle_failed", reason: s?.errorReason ?? "no_settlement" });
 
   // 6b. ON-CHAIN PROOF — the cornerstone. NEVER trust the facilitator's claimed
   // success/signature/payer. Independently confirm the on-chain transfer of
   // >= reqd.amount of reqd.asset into OUR payTo ATA, and derive the payer FROM
   // THE CHAIN. No confirmed matching transfer → fail closed (the agent is never
   // served a paid response without a real, verified on-chain settlement).
-  const onchain = await verifySplSettlementOnChain(s.signature, reqd);
+  const onchain = await verifySplSettlementOnChain(sig, reqd);
   if (!onchain) return fail(402, { error: "settlement_unverified_onchain" });
   if ("unconfirmed" in onchain) {
     // The facilitator settled but the tx hasn't confirmed in our window (RPC
     // lag) — the agent DID pay, so DON'T hard-reject. A retry re-settles the
     // SAME signature (idempotent), which confirms by then and is served exactly
     // once via the single-use claim. Retryable, not charged-but-denied.
-    console.warn(`[x402-standard] settle confirm timeout (retryable) sig=${s.signature.slice(0, 16)}…`);
+    console.warn(`[x402-standard] settle confirm timeout (retryable) sig=${sig.slice(0, 16)}…`);
     return fail(402, { error: "settlement_confirming", retry_after_seconds: 5 });
   }
 
@@ -422,7 +427,7 @@ export async function settleStandardSplPayment(
     // single-use) but does NOT accrue — the amount is a USDC/wSOL atomic, not
     // lamports; the SPL->SOL sweep credits the holder pool after conversion.
     endpoint_path: opts.endpoint, method: c.req.method, amount_lamports: reqd.amount,
-    payer_pubkey: payer, tx_signature: s.signature, nonce, kind: "settled-spl",
+    payer_pubkey: payer, tx_signature: sig, nonce, kind: "settled-spl",
     asset: reqd.asset,
   });
   if (!claim || claim.fresh !== true) {
@@ -432,7 +437,7 @@ export async function settleStandardSplPayment(
   }
 
   // 8. emit the standard settlement response header + propagate payer for per-wallet gating
-  try { c.header("PAYMENT-RESPONSE", Buffer.from(JSON.stringify({ success: true, signature: s.signature, payer })).toString("base64")); } catch { /* non-fatal */ }
+  try { c.header("PAYMENT-RESPONSE", Buffer.from(JSON.stringify({ success: true, signature: sig, payer })).toString("base64")); } catch { /* non-fatal */ }
   return { ok: true, payer };
 }
 
