@@ -209,6 +209,20 @@ async function verifySplSettlementOnChain(
   }
   if (!tx || tx.meta?.err) return null;
 
+  // Pin the asset DEFINITIVELY. A bare SPL `transfer` carries no mint in its
+  // parsed info, so the destination-ATA match alone is necessary-but-not-
+  // sufficient proof. Confirm via the tx's on-chain token balances that OUR
+  // payTo owns a `reqd.asset` token account touched by this tx — leaving no
+  // way to credit a different mint.
+  const tokenBalances = [
+    ...(tx.meta?.postTokenBalances ?? []),
+    ...(tx.meta?.preTokenBalances ?? []),
+  ];
+  const payToOwnsReqdAsset = tokenBalances.some(
+    (b) => b.mint === reqd.asset && b.owner === getPayTo(),
+  );
+  if (!payToOwnsReqdAsset) return null;
+
   const top = tx.transaction.message.instructions || [];
   const inner = (tx.meta?.innerInstructions || []).flatMap((i) => i.instructions);
   for (const ix of [...top, ...inner]) {
@@ -343,14 +357,26 @@ export async function settleStandardSplPayment(
   const nonceCheck = verifyNonce(nonce, opts.endpoint);
   if (!nonceCheck.ok) return fail(402, { error: "nonce_invalid", reason: nonceCheck.reason });
   const payer = onchain.payer; // ON-CHAIN-DERIVED ONLY — never s.payer / v.payer
-  await botRecord({
-    // kind "settled-spl" so the bot records the metric + claims the real signature
-    // (durable single-use) but does NOT accrue: the amount is a USDC/wSOL atomic,
-    // not lamports — the SPL->SOL sweep credits the holder pool after conversion.
+  // DURABLE SINGLE-USE (the ONLY cross-instance replay guard for SVM exact — the
+  // per-request nonce is fresh-random so it can't dedup a settled signature).
+  // Claim the on-chain signature on the bot's UNIQUE(tx_signature) and SERVE ONLY
+  // if the claim is fresh. fresh===false → this signature was already served →
+  // reject as a replay. null (bot/DB unreachable) → fail CLOSED: we cannot prove
+  // single-use, so we must not serve (the on-chain payment is recorded by its
+  // signature and is reconcilable on retry once the bot is reachable).
+  const claim = await botRecord({
+    // kind "settled-spl": records the metric + claims the signature (durable
+    // single-use) but does NOT accrue — the amount is a USDC/wSOL atomic, not
+    // lamports; the SPL->SOL sweep credits the holder pool after conversion.
     endpoint_path: opts.endpoint, method: c.req.method, amount_lamports: reqd.amount,
     payer_pubkey: payer, tx_signature: s.signature, nonce, kind: "settled-spl",
     asset: reqd.asset,
   });
+  if (!claim || claim.fresh !== true) {
+    return fail(402, {
+      error: claim && claim.fresh === false ? "payment_already_used" : "settlement_claim_unconfirmed",
+    });
+  }
 
   // 8. emit the standard settlement response header + propagate payer for per-wallet gating
   try { c.header("PAYMENT-RESPONSE", Buffer.from(JSON.stringify({ success: true, signature: s.signature, payer })).toString("base64")); } catch { /* non-fatal */ }
