@@ -181,7 +181,7 @@ function settleConn(): Connection {
 async function verifySplSettlementOnChain(
   signature: string,
   reqd: PaymentRequirements,
-): Promise<{ payer: string } | null> {
+): Promise<{ payer: string } | { unconfirmed: true } | null> {
   if (typeof signature !== "string" || !/^[1-9A-HJ-NP-Za-km-z]{64,90}$/.test(signature)) return null;
   // The destination must be OUR payTo ATA for the required asset. An ATA can
   // only ever hold its own mint, so destination === payToAta(asset) already
@@ -196,9 +196,10 @@ async function verifySplSettlementOnChain(
   try { minAmount = BigInt(reqd.amount); } catch { return null; }
   if (minAmount <= 0n) return null;
 
-  // The facilitator returns before finality — poll briefly for the confirmed tx.
+  // The facilitator returns before finality — poll for the confirmed tx. ~24s
+  // (well within the 60s maxTimeout) so a congested-network confirmation lands.
   let tx: Awaited<ReturnType<Connection["getParsedTransaction"]>> = null;
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < 12; i++) {
     try {
       tx = await settleConn().getParsedTransaction(signature, {
         maxSupportedTransactionVersion: 0, commitment: "confirmed",
@@ -207,7 +208,13 @@ async function verifySplSettlementOnChain(
     if (tx) break;
     await new Promise((r) => setTimeout(r, 2000));
   }
-  if (!tx || tx.meta?.err) return null;
+  // tx NEVER fetched → unconfirmed (RPC lag): the facilitator settled but we
+  // couldn't yet see it. This is RETRYABLE — distinct from a real mismatch — so
+  // the caller can tell the agent to retry (the same signature re-confirms and
+  // is served exactly once) instead of a hard reject of an agent who DID pay.
+  if (!tx) return { unconfirmed: true };
+  // tx fetched but failed on-chain → hard reject (no payment landed).
+  if (tx.meta?.err) return null;
 
   // Asset pinning. The destination-ATA match in the loop below is already
   // structurally sufficient: `expectedAta` is derived from (payTo, reqd.asset)
@@ -386,6 +393,14 @@ export async function settleStandardSplPayment(
   // served a paid response without a real, verified on-chain settlement).
   const onchain = await verifySplSettlementOnChain(s.signature, reqd);
   if (!onchain) return fail(402, { error: "settlement_unverified_onchain" });
+  if ("unconfirmed" in onchain) {
+    // The facilitator settled but the tx hasn't confirmed in our window (RPC
+    // lag) — the agent DID pay, so DON'T hard-reject. A retry re-settles the
+    // SAME signature (idempotent), which confirms by then and is served exactly
+    // once via the single-use claim. Retryable, not charged-but-denied.
+    console.warn(`[x402-standard] settle confirm timeout (retryable) sig=${s.signature.slice(0, 16)}…`);
+    return fail(402, { error: "settlement_confirming", retry_after_seconds: 5 });
+  }
 
   // 7. resource binding re-check + claim the SETTLED signature (durable single-use)
   const nonceCheck = verifyNonce(nonce, opts.endpoint);
