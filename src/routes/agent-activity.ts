@@ -9,7 +9,7 @@ import type { Context } from "hono";
  * and growing?" signal for any agent or third-party monitor evaluating
  * Magpie before deeper integration.
  */
-const BOT_API = process.env.MAGPIE_BOT_API || "https://api.magpie.capital";
+const BOT_API = process.env.MAGPIE_BOT_API || "https://magpie-bot-production.up.railway.app";
 
 export async function agentActivityHandler(c: Context) {
   const limit = c.req.query("limit") ?? "50";

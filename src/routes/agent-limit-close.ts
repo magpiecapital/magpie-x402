@@ -40,7 +40,7 @@ import { verifyAgentFromContext } from "../lib/agent-envelope.js";
  *   any cancel that wins the race actually prevents execution.
  */
 
-const BOT_API = process.env.MAGPIE_BOT_API || "https://api.magpie.capital";
+const BOT_API = process.env.MAGPIE_BOT_API || "https://magpie-bot-production.up.railway.app";
 const INTERNAL_TOKEN = process.env.INTERNAL_API_TOKEN || "";
 
 const VALID_TRIGGER_KINDS = new Set(["mc_usd", "price_usd", "price_sol"]);

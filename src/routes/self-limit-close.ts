@@ -43,7 +43,7 @@ import { PublicKey } from "@solana/web3.js";
  *     intentionally public; x402 adds the pay-per-arm convenience layer.
  */
 
-const BOT_API = process.env.MAGPIE_BOT_API || "https://api.magpie.capital";
+const BOT_API = process.env.MAGPIE_BOT_API || "https://magpie-bot-production.up.railway.app";
 
 // The bot caps the decoded signed message at 2048 bytes; mirror that so we
 // reject oversized payloads before a round-trip.

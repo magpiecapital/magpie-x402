@@ -226,7 +226,7 @@ export function x402Required(config: X402Config): MiddlewareHandler {
 // 3s timeout caps per-invocation latency contribution to ~0ms in the
 // happy path (we don't await) and 3s upper bound if a Promise leak
 // somehow tries to drain it.
-const BOT_API_FOR_METRICS = process.env.MAGPIE_BOT_API || "https://api.magpie.capital";
+const BOT_API_FOR_METRICS = process.env.MAGPIE_BOT_API || "https://magpie-bot-production.up.railway.app";
 const INTERNAL_TOKEN_FOR_METRICS = process.env.INTERNAL_API_TOKEN || "";
 // Records the paid call AND serves as the durable, cross-instance single-use
 // claim. Returns { fresh: true } when this signature was claimed for the first

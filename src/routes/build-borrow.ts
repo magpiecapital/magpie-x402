@@ -61,7 +61,7 @@ import { enforcePayerMatchesWallet } from "../lib/payer-bind.js";
  * signs; the agent's wallet bears all loan obligations.
  */
 
-const BOT_API = process.env.MAGPIE_BOT_API || "https://api.magpie.capital";
+const BOT_API = process.env.MAGPIE_BOT_API || "https://magpie-bot-production.up.railway.app";
 const INTERNAL_TOKEN = process.env.INTERNAL_API_TOKEN || "";
 
 export async function buildBorrowHandler(c: Context) {
