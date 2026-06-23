@@ -284,7 +284,7 @@ Premium Tier (in build, 4–6 weeks) — tokenized US equities ($NVDAx, $COINx, 
 
 [github.com/magpiecapital/magpie-x402](https://github.com/magpiecapital/magpie-x402) — SDK lives at `sdk/`. Sister projects in the same repo:
 
-- `examples/` — 12 turn-key TypeScript agents using this SDK directly
+- `examples/` — 13 turn-key TypeScript agents using this SDK directly (incl. a bring-your-own-wallet / `BaseWallet` integration)
 - `mcp/` — MCP server exposing every SDK method as a tool for Claude / Cursor / Windsurf / ChatGPT desktop
 - `agents/yield-bot/` — reference autonomous agent built on this SDK
 
