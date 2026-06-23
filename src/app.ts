@@ -77,13 +77,22 @@ const CORS_DEFAULT = "https://magpie.capital,https://www.magpie.capital";
 app.use("*", cors({
   origin: (process.env.CORS_ORIGINS || CORS_DEFAULT).split(",").map((s) => s.trim()),
   allowMethods: ["GET", "HEAD", "POST", "DELETE", "OPTIONS"],
-  allowHeaders: ["Content-Type", "X-Payment", "X-Payment-Required-Scheme"],
+  // Standard x402 v2: clients send the payment proof on the retry via the
+  // PAYMENT-SIGNATURE request header — the OPTIONS preflight MUST allow it or
+  // browser / cross-origin standard agents (and x402scan) are blocked from
+  // paying. (Native rail = X-Payment.)
+  allowHeaders: ["Content-Type", "X-Payment", "X-Payment-Required-Scheme", "PAYMENT-SIGNATURE"],
   exposeHeaders: [
     "X-Payment-Required-Scheme",
     "X-Payment-Required-Amount",
     "X-Payment-Required-Recipient",
     "X-Payment-Required-Nonce",
     "X-Payment-Required-Memo",
+    // Standard x402 v2 headers — a browser agent can't READ a response header
+    // that isn't exposed. PAYMENT-REQUIRED carries the base64 PaymentRequirements
+    // (the 402 challenge); PAYMENT-RESPONSE carries the base64 settlement proof.
+    "PAYMENT-REQUIRED",
+    "PAYMENT-RESPONSE",
     "Retry-After",
   ],
 }));
