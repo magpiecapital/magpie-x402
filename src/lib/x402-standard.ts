@@ -36,7 +36,7 @@
  * invokes this and the 402 omits SPL accepts — instant revert to native-only.
  */
 import type { Context } from "hono";
-import { PublicKey } from "@solana/web3.js";
+import { Connection, PublicKey } from "@solana/web3.js";
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { mintNonce, verifyNonce, NONCE_TTL_MS } from "./hmac-nonce.js";
 
@@ -49,8 +49,19 @@ export const WSOL_DECIMALS = 9;
 
 const FACILITATOR_PRIMARY = process.env.X402_FACILITATOR_URL || "https://facilitator.payai.network";
 const FACILITATOR_FALLBACK = process.env.X402_FACILITATOR_URL_FALLBACK || "https://dexter.cash/facilitator";
-// Only these hosts may ever be used (provenance for the co-signing feePayer).
-const FACILITATOR_ALLOWLIST = new Set([FACILITATOR_PRIMARY, FACILITATOR_FALLBACK].map(hostOf));
+// HARDCODED trust anchor. The allowlist is NOT derived from the (env-tunable)
+// facilitator URLs — that would be circular (an env override could whitelist
+// itself and point settlement at an attacker-controlled facilitator). Only an
+// env URL whose host is in this in-code set is ever usable for verify/settle.
+const FACILITATOR_TRUSTED_HOSTS = new Set([
+  "facilitator.payai.network",
+  "dexter.cash",
+]);
+const FACILITATOR_ALLOWLIST = new Set(
+  [FACILITATOR_PRIMARY, FACILITATOR_FALLBACK]
+    .map(hostOf)
+    .filter((h) => FACILITATOR_TRUSTED_HOSTS.has(h)),
+);
 const SOL_USD_RATE_FALLBACK = Number(process.env.X402_SOL_USD_RATE || "150"); // fallback ONLY — getSolUsdRate() fetches the live rate
 const WSOL_ENABLED = process.env.X402_WSOL_ACCEPT_ENABLED !== "false"; // gate wSOL until mainnet settle-tested
 const BOT_API = process.env.MAGPIE_BOT_API || "https://magpie-bot-production.up.railway.app";
@@ -153,9 +164,105 @@ function getPayTo(): string {
   return p;
 }
 
+// ── On-chain settlement verification (NEVER trust the facilitator's word) ─────
+// SOLANA_RPC_URL is server-owned. A compromised / MITM'd / lying facilitator can
+// at most return a bogus {success, signature, payer}; we INDEPENDENTLY confirm
+// the on-chain transfer of >= the required amount of the required asset into OUR
+// payTo ATA, and derive the payer FROM THE CHAIN (never the facilitator's
+// claimed payer — that feeds enforcePayerMatchesWallet downstream). No confirmed
+// matching transfer → fail closed.
+const RPC_URL = process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com";
+let _settleConn: Connection | null = null;
+function settleConn(): Connection {
+  if (!_settleConn) _settleConn = new Connection(RPC_URL, "confirmed");
+  return _settleConn;
+}
+
+async function verifySplSettlementOnChain(
+  signature: string,
+  reqd: PaymentRequirements,
+): Promise<{ payer: string } | null> {
+  if (typeof signature !== "string" || !/^[1-9A-HJ-NP-Za-km-z]{64,90}$/.test(signature)) return null;
+  // The destination must be OUR payTo ATA for the required asset. An ATA can
+  // only ever hold its own mint, so destination === payToAta(asset) already
+  // pins the asset even for a bare `transfer`.
+  let expectedAta: string;
+  try {
+    expectedAta = getAssociatedTokenAddressSync(
+      new PublicKey(reqd.asset), new PublicKey(getPayTo()), true,
+    ).toBase58();
+  } catch { return null; }
+  let minAmount: bigint;
+  try { minAmount = BigInt(reqd.amount); } catch { return null; }
+  if (minAmount <= 0n) return null;
+
+  // The facilitator returns before finality — poll briefly for the confirmed tx.
+  let tx: Awaited<ReturnType<Connection["getParsedTransaction"]>> = null;
+  for (let i = 0; i < 6; i++) {
+    try {
+      tx = await settleConn().getParsedTransaction(signature, {
+        maxSupportedTransactionVersion: 0, commitment: "confirmed",
+      });
+    } catch { tx = null; }
+    if (tx) break;
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  if (!tx || tx.meta?.err) return null;
+
+  // Asset pinning. The destination-ATA match in the loop below is already
+  // structurally sufficient: `expectedAta` is derived from (payTo, reqd.asset)
+  // and an ATA can ONLY ever hold its own mint, so a non-errored transfer of
+  // >= the amount into expectedAta definitively credits reqd.asset to payTo.
+  // The tx's token balances are used as EXTRA corroboration when the RPC
+  // populated them — but we must NOT hard-require them: some providers / tx
+  // shapes omit pre/postTokenBalances, and a hard gate there would falsely
+  // reject a legitimately-settled payment (charged-but-denied). So: reject ONLY
+  // when balances ARE present and CONTRADICT (none credit reqd.asset to payTo);
+  // when absent, fall through to the structurally-sufficient loop.
+  const tokenBalances = [
+    ...(tx.meta?.postTokenBalances ?? []),
+    ...(tx.meta?.preTokenBalances ?? []),
+  ];
+  if (
+    tokenBalances.length > 0 &&
+    !tokenBalances.some((b) => b.mint === reqd.asset && b.owner === getPayTo())
+  ) {
+    return null;
+  }
+
+  const top = tx.transaction.message.instructions || [];
+  const inner = (tx.meta?.innerInstructions || []).flatMap((i) => i.instructions);
+  for (const ix of [...top, ...inner]) {
+    if (!("parsed" in ix)) continue;
+    const program = (ix as { program?: string }).program;
+    if (program !== "spl-token" && program !== "spl-token-2022") continue;
+    const p = (ix as { parsed?: { type?: string; info?: Record<string, unknown> } }).parsed;
+    if (!p || (p.type !== "transfer" && p.type !== "transferChecked")) continue;
+    const info = p.info ?? {};
+    if (info.destination !== expectedAta) continue;
+    const amtStr = p.type === "transferChecked"
+      ? (info.tokenAmount as { amount?: string } | undefined)?.amount
+      : (info.amount as string | undefined);
+    if (typeof amtStr !== "string") continue;
+    let amt: bigint;
+    try { amt = BigInt(amtStr); } catch { continue; }
+    if (amt < minAmount) continue;
+    // transferChecked also carries the mint — assert it (defense in depth).
+    if (p.type === "transferChecked" && typeof info.mint === "string" && info.mint !== reqd.asset) continue;
+    const payer = info.authority ?? info.multisigAuthority ?? info.source;
+    if (typeof payer !== "string") continue;
+    try { new PublicKey(payer); } catch { continue; }
+    return { payer };
+  }
+  return null;
+}
+
 // ── Facilitator calls (separate, fail-closed) ───────────────────────────────
 async function facilitator(path: "verify" | "settle", body: unknown, timeoutMs: number): Promise<unknown | null> {
   const fp = _feePayerCache?.url ? _feePayerCache.url : FACILITATOR_PRIMARY;
+  // Defense-in-depth: never call a host outside the hardcoded trust anchor,
+  // even if the cache was somehow populated with an untrusted URL.
+  if (!FACILITATOR_ALLOWLIST.has(hostOf(fp))) return null;
   try {
     const r = await fetch(`${fp}/${path}`, {
       method: "POST",
@@ -217,14 +324,25 @@ export async function settleStandardSplPayment(
   if (reqd.payTo !== getPayTo() || reqd.network !== SOLANA_CAIP2 || reqd.extra.feePayer !== fp.feePayer) {
     return fail(500, { error: "requirements_integrity" });
   }
+  // bind the client's claimed amount to OUR required amount — reject an underpay
+  // early. (The on-chain check in step 6b is authoritative; this is defense-in-depth.)
+  const clientAmount = (payload.accepted as { amount?: string } | undefined)?.amount;
+  if (clientAmount !== undefined) {
+    let ca: bigint;
+    try { ca = BigInt(clientAmount); } catch { return fail(402, { error: "invalid_amount" }); }
+    if (ca < BigInt(reqd.amount)) return fail(402, { error: "amount_below_required", required: reqd.amount });
+  }
 
-  // 5. PRE-SETTLE RESERVATION (fail closed): claim the nonce before settling
+  // 5. PRE-SETTLE RESERVATION (fail CLOSED): claim the nonce before settling.
+  // Require fresh===true EXPLICITLY — a db_blip returns fresh:undefined, which
+  // must NOT count as a successful reservation (that would allow a double-settle
+  // on retry). Anything other than a fresh claim → reject.
   const reserve = await botRecord({
     endpoint_path: opts.endpoint, method: c.req.method, amount_lamports: reqd.amount,
     payer_pubkey: "", tx_signature: `PENDING:${nonce}`, nonce, kind: "reserve",
   });
-  if (!reserve || reserve.fresh === false) {
-    return fail(402, { error: reserve ? "payment_already_used" : "reservation_unavailable" });
+  if (!reserve || reserve.fresh !== true) {
+    return fail(402, { error: reserve && reserve.fresh === false ? "payment_already_used" : "reservation_unavailable" });
   }
 
   // 6. VERIFY then SETTLE (server-owned requirements both times)
@@ -234,18 +352,38 @@ export async function settleStandardSplPayment(
   const s = (await facilitator("settle", { x402Version: 2, paymentPayload: payload, paymentRequirements: reqd }, 20000)) as SettleResponse | null;
   if (!s || s.success !== true || !s.signature) return fail(402, { error: "settle_failed", reason: s?.errorReason ?? "no_settlement" });
 
+  // 6b. ON-CHAIN PROOF — the cornerstone. NEVER trust the facilitator's claimed
+  // success/signature/payer. Independently confirm the on-chain transfer of
+  // >= reqd.amount of reqd.asset into OUR payTo ATA, and derive the payer FROM
+  // THE CHAIN. No confirmed matching transfer → fail closed (the agent is never
+  // served a paid response without a real, verified on-chain settlement).
+  const onchain = await verifySplSettlementOnChain(s.signature, reqd);
+  if (!onchain) return fail(402, { error: "settlement_unverified_onchain" });
+
   // 7. resource binding re-check + claim the SETTLED signature (durable single-use)
   const nonceCheck = verifyNonce(nonce, opts.endpoint);
   if (!nonceCheck.ok) return fail(402, { error: "nonce_invalid", reason: nonceCheck.reason });
-  const payer = s.payer ?? v.payer ?? "";
-  await botRecord({
-    // kind "settled-spl" so the bot records the metric + claims the real signature
-    // (durable single-use) but does NOT accrue: the amount is a USDC/wSOL atomic,
-    // not lamports — the SPL->SOL sweep credits the holder pool after conversion.
+  const payer = onchain.payer; // ON-CHAIN-DERIVED ONLY — never s.payer / v.payer
+  // DURABLE SINGLE-USE (the ONLY cross-instance replay guard for SVM exact — the
+  // per-request nonce is fresh-random so it can't dedup a settled signature).
+  // Claim the on-chain signature on the bot's UNIQUE(tx_signature) and SERVE ONLY
+  // if the claim is fresh. fresh===false → this signature was already served →
+  // reject as a replay. null (bot/DB unreachable) → fail CLOSED: we cannot prove
+  // single-use, so we must not serve (the on-chain payment is recorded by its
+  // signature and is reconcilable on retry once the bot is reachable).
+  const claim = await botRecord({
+    // kind "settled-spl": records the metric + claims the signature (durable
+    // single-use) but does NOT accrue — the amount is a USDC/wSOL atomic, not
+    // lamports; the SPL->SOL sweep credits the holder pool after conversion.
     endpoint_path: opts.endpoint, method: c.req.method, amount_lamports: reqd.amount,
     payer_pubkey: payer, tx_signature: s.signature, nonce, kind: "settled-spl",
     asset: reqd.asset,
   });
+  if (!claim || claim.fresh !== true) {
+    return fail(402, {
+      error: claim && claim.fresh === false ? "payment_already_used" : "settlement_claim_unconfirmed",
+    });
+  }
 
   // 8. emit the standard settlement response header + propagate payer for per-wallet gating
   try { c.header("PAYMENT-RESPONSE", Buffer.from(JSON.stringify({ success: true, signature: s.signature, payer })).toString("base64")); } catch { /* non-fatal */ }
