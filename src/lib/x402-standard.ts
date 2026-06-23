@@ -214,8 +214,12 @@ export async function settleStandardSplPayment(
   if (!nonceCheck.ok) return fail(402, { error: "nonce_invalid", reason: nonceCheck.reason });
   const payer = s.payer ?? v.payer ?? "";
   await botRecord({
+    // kind "settled-spl" so the bot records the metric + claims the real signature
+    // (durable single-use) but does NOT accrue: the amount is a USDC/wSOL atomic,
+    // not lamports — the SPL->SOL sweep credits the holder pool after conversion.
     endpoint_path: opts.endpoint, method: c.req.method, amount_lamports: reqd.amount,
-    payer_pubkey: payer, tx_signature: s.signature, nonce, kind: "settled",
+    payer_pubkey: payer, tx_signature: s.signature, nonce, kind: "settled-spl",
+    asset: reqd.asset,
   });
 
   // 8. emit the standard settlement response header + propagate payer for per-wallet gating
