@@ -38,7 +38,7 @@
 import type { Context } from "hono";
 import { Connection, PublicKey } from "@solana/web3.js";
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
-import { mintNonce, verifyNonce, NONCE_TTL_MS } from "./hmac-nonce.js";
+import { verifyNonce, NONCE_TTL_MS } from "./hmac-nonce.js";
 
 // ── Constants (env-tunable) ─────────────────────────────────────────────────
 export const SOLANA_CAIP2 = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"; // mainnet
@@ -311,41 +311,68 @@ export async function settleStandardSplPayment(
   try { payload = JSON.parse(Buffer.from(opts.v2Sig, "base64").toString("utf8")); }
   catch { return fail(402, { error: "invalid_payment_signature" }); }
 
-  // 3. SERVER-OWNED requirements (resource-bound via hmac nonce + memo)
-  const nonce = mintNonce(opts.endpoint);
-  const memo = `magpie-x402:${nonce}`;
-  const accepts = await buildSplAccepts(opts.amountLamports, memo, fp.feePayer);
-
-  // 4. select the requirement matching the asset the client says it paid; assert it's ours
-  const clientAsset = payload.accepted?.asset;
-  const reqd = accepts.find((a) => a.asset === clientAsset);
-  if (!reqd) return fail(402, { error: "unsupported_asset", supported: accepts.map((a) => a.asset) });
-  // defense-in-depth: never settle against anything but our own server-built object
-  if (reqd.payTo !== getPayTo() || reqd.network !== SOLANA_CAIP2 || reqd.extra.feePayer !== fp.feePayer) {
-    return fail(500, { error: "requirements_integrity" });
+  // 3. REQUIREMENTS from the client's `accepted` object — VALIDATED field-by-
+  // field against server policy. The client paid against the requirements it was
+  // challenged with, whose extra.memo carries OUR endpoint-bound HMAC nonce. We
+  // must NOT re-mint a fresh nonce: its memo wouldn't match the client's on-chain
+  // tx (every payment would fail). So we trust NOTHING from `accepted` until each
+  // field is checked, then settle against it. The on-chain check (6b) + the
+  // durable signature claim (7) are the authoritative settlement + single-use guards.
+  const accepted = payload.accepted as {
+    scheme?: string; network?: string; asset?: string; amount?: string;
+    payTo?: string; extra?: { feePayer?: string; memo?: string };
+  } | undefined;
+  if (!accepted || typeof accepted !== "object") return fail(402, { error: "missing_accepted" });
+  // 3a. asset must be one we actually offer
+  const isUsdc = accepted.asset === USDC_MINT;
+  const isWsol = accepted.asset === WSOL_MINT && WSOL_ENABLED;
+  if (!isUsdc && !isWsol) {
+    return fail(402, { error: "unsupported_asset", supported: [USDC_MINT, ...(WSOL_ENABLED ? [WSOL_MINT] : [])] });
   }
-  // bind the client's claimed amount to OUR required amount — reject an underpay
-  // early. (The on-chain check in step 6b is authoritative; this is defense-in-depth.)
-  const clientAmount = (payload.accepted as { amount?: string } | undefined)?.amount;
-  if (clientAmount !== undefined) {
-    let ca: bigint;
-    try { ca = BigInt(clientAmount); } catch { return fail(402, { error: "invalid_amount" }); }
-    if (ca < BigInt(reqd.amount)) return fail(402, { error: "amount_below_required", required: reqd.amount });
+  // 3b. every non-amount field must be OURS (the client cannot redirect funds,
+  //     swap the feePayer, or change networks)
+  if (accepted.scheme !== "exact") return fail(402, { error: "bad_scheme" });
+  if (accepted.network !== SOLANA_CAIP2) return fail(402, { error: "bad_network" });
+  if (accepted.payTo !== getPayTo()) return fail(402, { error: "bad_payto" });
+  if (accepted.extra?.feePayer !== fp.feePayer) return fail(402, { error: "bad_feepayer" });
+  // 3c. RESOURCE BINDING: memo must be OUR hmac nonce, bound to THIS endpoint —
+  //     so a payment for /a can't satisfy /b.
+  const memo = accepted.extra?.memo;
+  const mm = typeof memo === "string" ? memo.match(/^magpie-x402:([A-Za-z0-9_-]{16,200})$/) : null;
+  if (!mm) return fail(402, { error: "bad_memo" });
+  const nonce = mm[1];
+  const nb = verifyNonce(nonce, opts.endpoint);
+  if (!nb.ok) return fail(402, { error: "nonce_invalid", reason: nb.reason });
+  // 3d. NO UNDERPAY: claimed amount >= our price for the chosen asset (10%
+  //     SOL/USD drift headroom on USDC within the nonce window; wSOL is exact).
+  //     Re-checked authoritatively on-chain in 6b against this same reqd.amount.
+  let claimed: bigint;
+  try { claimed = BigInt(accepted.amount ?? ""); } catch { return fail(402, { error: "invalid_amount" }); }
+  const serverMin = isWsol
+    ? BigInt(wsolAtomicForLamports(opts.amountLamports))
+    : BigInt(usdcAtomicForLamports(opts.amountLamports, await getSolUsdRate()));
+  const floor = isWsol ? serverMin : (serverMin * 90n) / 100n;
+  if (claimed <= 0n || claimed < floor) {
+    return fail(402, { error: "amount_below_required", required: serverMin.toString() });
   }
 
-  // 5. PRE-SETTLE RESERVATION (fail CLOSED): claim the nonce before settling.
-  // Require fresh===true EXPLICITLY — a db_blip returns fresh:undefined, which
-  // must NOT count as a successful reservation (that would allow a double-settle
-  // on retry). Anything other than a fresh claim → reject.
-  const reserve = await botRecord({
-    endpoint_path: opts.endpoint, method: c.req.method, amount_lamports: reqd.amount,
-    payer_pubkey: "", tx_signature: `PENDING:${nonce}`, nonce, kind: "reserve",
-  });
-  if (!reserve || reserve.fresh !== true) {
-    return fail(402, { error: reserve && reserve.fresh === false ? "payment_already_used" : "reservation_unavailable" });
-  }
+  // 3e. the VALIDATED requirements we settle against (client's memo + amount, OUR
+  //     payTo / feePayer / network / asset).
+  const reqd: PaymentRequirements = {
+    scheme: "exact", network: SOLANA_CAIP2, payTo: getPayTo(),
+    maxTimeoutSeconds: Math.min(60, Math.floor(NONCE_TTL_MS / 1000)),
+    extra: { feePayer: fp.feePayer, memo: `magpie-x402:${nonce}` },
+    amount: claimed.toString(), asset: isUsdc ? USDC_MINT : WSOL_MINT,
+  };
 
-  // 6. VERIFY then SETTLE (server-owned requirements both times)
+  // NOTE: no pre-settle nonce reservation. The durable single-use guard is the
+  // post-settle claim on UNIQUE(tx_signature) (step 7), which is cross-instance
+  // and lets a legit retry after a transient failure re-settle the SAME signature
+  // and be served exactly once. (A fresh-random pre-settle nonce reserve never
+  // actually deduped a settled signature, and a stable-nonce reserve would
+  // wrongly block legit retries.)
+
+  // 6. VERIFY then SETTLE (server-validated requirements both times)
   const v = (await facilitator("verify", { x402Version: 2, paymentPayload: payload, paymentRequirements: reqd }, 8000)) as VerifyResponse | null;
   if (!v || v.isValid !== true) return fail(402, { error: "payment_invalid", reason: v?.invalidReason ?? "verify_failed" });
 
