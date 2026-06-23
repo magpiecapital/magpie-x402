@@ -51,7 +51,7 @@ const FACILITATOR_PRIMARY = process.env.X402_FACILITATOR_URL || "https://facilit
 const FACILITATOR_FALLBACK = process.env.X402_FACILITATOR_URL_FALLBACK || "https://dexter.cash/facilitator";
 // Only these hosts may ever be used (provenance for the co-signing feePayer).
 const FACILITATOR_ALLOWLIST = new Set([FACILITATOR_PRIMARY, FACILITATOR_FALLBACK].map(hostOf));
-const SOL_USD_RATE = Number(process.env.X402_SOL_USD_RATE || "150"); // USDC pricing default; refine via oracle later
+const SOL_USD_RATE_FALLBACK = Number(process.env.X402_SOL_USD_RATE || "150"); // fallback ONLY — getSolUsdRate() fetches the live rate
 const WSOL_ENABLED = process.env.X402_WSOL_ACCEPT_ENABLED !== "false"; // gate wSOL until mainnet settle-tested
 const BOT_API = process.env.MAGPIE_BOT_API || "https://magpie-bot-production.up.railway.app";
 const INTERNAL_TOKEN = process.env.INTERNAL_API_TOKEN || "";
@@ -101,10 +101,34 @@ export async function getSvmFeePayer(): Promise<{ url: string; feePayer: string 
 }
 
 // ── Pricing (server-owned) ──────────────────────────────────────────────────
-export function usdcAtomicForLamports(amountLamports: bigint): string {
-  // USDC default = SOL-price equivalent at the env rate. (Override per-route later.)
+// Live SOL/USD so USDC is priced at the REAL SOL-equivalent. A fixed rate
+// over/under-charges agents as SOL moves — a hardcoded 150 was ~2.1x the real
+// ~$71 at go-live, which would actively repel USDC-paying agents. Jupiter-
+// primary, cached 60s, env/150 fallback so a Jupiter blip never blocks a 402.
+let _solUsdCache: { rate: number; atMs: number } | null = null;
+export async function getSolUsdRate(): Promise<number> {
+  const now = Date.now();
+  if (_solUsdCache && now - _solUsdCache.atMs < 60_000) return _solUsdCache.rate;
+  try {
+    const r = await fetch(
+      `https://lite-api.jup.ag/price/v3?ids=${WSOL_MINT}`,
+      { signal: AbortSignal.timeout(4000) },
+    );
+    if (r.ok) {
+      const j = (await r.json()) as Record<string, { usdPrice?: number } | undefined>;
+      const p = j[WSOL_MINT]?.usdPrice;
+      if (typeof p === "number" && p > 0 && p < 100_000) {
+        _solUsdCache = { rate: p, atMs: now };
+        return p;
+      }
+    }
+  } catch { /* fall through to fallback */ }
+  return SOL_USD_RATE_FALLBACK;
+}
+
+export function usdcAtomicForLamports(amountLamports: bigint, solUsdRate: number): string {
   const sol = Number(amountLamports) / 1e9;
-  const usdc = Math.max(1, Math.round(sol * SOL_USD_RATE * 10 ** USDC_DECIMALS));
+  const usdc = Math.max(1, Math.round(sol * solUsdRate * 10 ** USDC_DECIMALS));
   return String(usdc);
 }
 export function wsolAtomicForLamports(amountLamports: bigint): string {
@@ -112,11 +136,12 @@ export function wsolAtomicForLamports(amountLamports: bigint): string {
 }
 
 // ── Build the SERVER-OWNED accepts for a route ──────────────────────────────
-export function buildSplAccepts(amountLamports: bigint, memo: string, feePayer: string): PaymentRequirements[] {
+export async function buildSplAccepts(amountLamports: bigint, memo: string, feePayer: string): Promise<PaymentRequirements[]> {
   const maxTimeoutSeconds = Math.min(60, Math.floor(NONCE_TTL_MS / 1000)); // <= blockhash/window; nonce TTL covers it
+  const solUsdRate = await getSolUsdRate();
   const base = { scheme: "exact" as const, network: SOLANA_CAIP2, payTo: getPayTo(), maxTimeoutSeconds, extra: { feePayer, memo } };
   const accepts: PaymentRequirements[] = [
-    { ...base, amount: usdcAtomicForLamports(amountLamports), asset: USDC_MINT },
+    { ...base, amount: usdcAtomicForLamports(amountLamports, solUsdRate), asset: USDC_MINT },
   ];
   if (WSOL_ENABLED) accepts.push({ ...base, amount: wsolAtomicForLamports(amountLamports), asset: WSOL_MINT });
   return accepts;
@@ -182,7 +207,7 @@ export async function settleStandardSplPayment(
   // 3. SERVER-OWNED requirements (resource-bound via hmac nonce + memo)
   const nonce = mintNonce(opts.endpoint);
   const memo = `magpie-x402:${nonce}`;
-  const accepts = buildSplAccepts(opts.amountLamports, memo, fp.feePayer);
+  const accepts = await buildSplAccepts(opts.amountLamports, memo, fp.feePayer);
 
   // 4. select the requirement matching the asset the client says it paid; assert it's ours
   const clientAsset = payload.accepted?.asset;

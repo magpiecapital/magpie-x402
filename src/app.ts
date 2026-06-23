@@ -13,6 +13,7 @@ import { secureHeaders } from "hono/secure-headers";
 import { bodyLimit } from "hono/body-limit";
 import { x402Required } from "./middleware/x402.js";
 import { rateLimit } from "./middleware/rate-limit.js";
+import { standardRailEnabled, SOLANA_CAIP2, USDC_MINT, WSOL_MINT } from "./lib/x402-standard.js";
 import { creditScoreHandler } from "./routes/credit-score.js";
 import { poolHandler, poolsAggregateHandler } from "./routes/pool.js";
 import { loanHandler, loanByPdaHandler } from "./routes/loan.js";
@@ -593,6 +594,27 @@ app.get("/openapi.json", (c) => c.json({
 
 app.get("/.well-known/x402.json", (c) =>
   c.json({
+    // Standard x402 v2 (SVM exact) — advertised ONLY when the rail is live, so
+    // a standard crawler/agent (x402scan, the bazaar) never sees a capability
+    // we can't honor. When present, every paid endpoint returns a 402 with a
+    // base64 PAYMENT-REQUIRED header + an `accepts` array; pay USDC or wSOL and
+    // a facilitator co-signs the feePayer. Retry with PAYMENT-SIGNATURE.
+    ...(standardRailEnabled()
+      ? {
+          x402Version: 2,
+          standard_x402: {
+            x402Version: 2,
+            scheme: "exact",
+            network: SOLANA_CAIP2,
+            assets: [
+              { symbol: "USDC", mint: USDC_MINT, decimals: 6 },
+              { symbol: "wSOL", mint: WSOL_MINT, decimals: 9 },
+            ],
+            facilitator: "https://facilitator.payai.network",
+            flow: "GET endpoint → 402 (PAYMENT-REQUIRED: base64 PaymentRequirements) → pay SPL to payTo via facilitator → retry with PAYMENT-SIGNATURE → 200 + PAYMENT-RESPONSE",
+          },
+        }
+      : {}),
     scheme: "x402/solana/v1",
     name: "Magpie — agent-native lending on Solana",
     description:
