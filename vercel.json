@@ -1,6 +1,9 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "ignoreCommand": "case \"$VERCEL_GIT_COMMIT_REF\" in dependabot/*) exit 0;; *) exit 1;; esac",
+  "functions": {
+    "api/index.ts": { "maxDuration": 60 }
+  },
   "rewrites": [
     { "source": "/(.*)", "destination": "/api" }
   ],

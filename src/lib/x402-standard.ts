@@ -380,10 +380,14 @@ export async function settleStandardSplPayment(
   // wrongly block legit retries.)
 
   // 6. VERIFY then SETTLE (server-validated requirements both times)
-  const v = (await facilitator("verify", { x402Version: 2, paymentPayload: payload, paymentRequirements: reqd }, 8000)) as VerifyResponse | null;
+  const v = (await facilitator("verify", { x402Version: 2, paymentPayload: payload, paymentRequirements: reqd }, 12000)) as VerifyResponse | null;
   if (!v || v.isValid !== true) return fail(402, { error: "payment_invalid", reason: v?.invalidReason ?? "verify_failed" });
 
-  const s = (await facilitator("settle", { x402Version: 2, paymentPayload: payload, paymentRequirements: reqd }, 20000)) as SettleResponse | null;
+  // The PayAI facilitator submits AND waits for on-chain confirmation before
+  // returning the signature (~20-30s on Solana), so this must outlast that or we
+  // time out AFTER the agent's money already moved (charged-but-denied). 40s
+  // fits inside the 60s function maxDuration (vercel.json) + the 60s nonce window.
+  const s = (await facilitator("settle", { x402Version: 2, paymentPayload: payload, paymentRequirements: reqd }, 40000)) as SettleResponse | null;
   if (!s || s.success !== true || !s.signature) return fail(402, { error: "settle_failed", reason: s?.errorReason ?? "no_settlement" });
 
   // 6b. ON-CHAIN PROOF — the cornerstone. NEVER trust the facilitator's claimed

@@ -23,6 +23,7 @@ import {
   TransactionMessage,
   VersionedTransaction,
   TransactionInstruction,
+  ComputeBudgetProgram,
 } from "@solana/web3.js";
 import {
   getAssociatedTokenAddressSync,
@@ -90,8 +91,13 @@ async function main() {
   const srcAta = getAssociatedTokenAddressSync(USDC, kp.publicKey, false, TOKEN_PROGRAM_ID);
   const dstAta = getAssociatedTokenAddressSync(USDC, payTo, true, TOKEN_PROGRAM_ID);
 
-  // 2. Build the partial-signed v0 tx (facilitator = feePayer; we sign the transfer authority)
+  // 2. Build the partial-signed v0 tx (facilitator = feePayer; we sign the transfer
+  //    authority). The x402 v2 SVM "exact" scheme mandates a STRICT 3-6 instruction
+  //    layout, in order: [SetComputeUnitLimit, SetComputeUnitPrice, TransferChecked,
+  //    (Memo)] — the facilitator rejects anything else (instructions_length).
   const ixs: TransactionInstruction[] = [
+    ComputeBudgetProgram.setComputeUnitLimit({ units: 60_000 }),
+    ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 }),
     createTransferCheckedInstruction(
       srcAta,
       USDC,
@@ -118,6 +124,19 @@ async function main() {
   tx.sign([kp]); // partial — the facilitator co-signs as feePayer in /settle
   const txB64 = Buffer.from(tx.serialize()).toString("base64");
 
+  // DEBUG: reproduce the facilitator's simulation locally to surface the error.
+  try {
+    const sim = await conn.simulateTransaction(tx, { sigVerify: false, replaceRecentBlockhash: true });
+    if (sim.value.err) {
+      console.log("LOCAL SIM err:", JSON.stringify(sim.value.err));
+      console.log("LOCAL SIM logs:\n  " + (sim.value.logs || []).slice(-10).join("\n  "));
+    } else {
+      console.log(`LOCAL SIM ok (units consumed: ${sim.value.unitsConsumed})`);
+    }
+  } catch (e) {
+    console.log("LOCAL SIM threw:", e instanceof Error ? e.message : e);
+  }
+
   // 3. PaymentPayload (x402 v2 SVM exact) + retry with PAYMENT-SIGNATURE
   const paymentPayload = {
     x402Version: 2,
@@ -140,6 +159,25 @@ async function main() {
     );
   }
   console.log("body:", body.slice(0, 400));
+
+  // DEBUG: when Magpie reports settle_failed, call the facilitator DIRECTLY to
+  // surface its raw verify/settle response (Magpie masks it as "no_settlement").
+  if (r2.status !== 200) {
+    console.log("\n--- direct PayAI facilitator debug (raw) ---");
+    const fbody = JSON.stringify({ x402Version: 2, paymentPayload, paymentRequirements: accept });
+    try {
+      const fv = await fetch("https://facilitator.payai.network/verify", {
+        method: "POST", headers: { "content-type": "application/json" }, body: fbody,
+      });
+      console.log(`PayAI /verify → ${fv.status}: ${(await fv.text()).slice(0, 300)}`);
+      const fs = await fetch("https://facilitator.payai.network/settle", {
+        method: "POST", headers: { "content-type": "application/json" }, body: fbody,
+      });
+      console.log(`PayAI /settle → ${fs.status}: ${(await fs.text()).slice(0, 500)}`);
+    } catch (e) {
+      console.log("direct PayAI err:", e instanceof Error ? e.message : e);
+    }
+  }
   if (r2.status === 200) {
     console.log("\n✅ SETTLE-TEST PASSED — the standard rail took a real USDC payment end-to-end.");
   } else {
