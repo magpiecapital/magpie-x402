@@ -41,16 +41,17 @@ interface SiteTokensResponse {
 // Categories that route a plain (no-exit) borrow to the V3 RWA program. Any
 // other category is treated as a V1 memecoin borrow. Exits always route to V4
 // regardless of category. Kept conservative + lowercase-compared.
+//
+// MUST be set-equal to the bot's RWA_CATEGORIES (magpie-bot
+// src/solana/program.js) and the site's (magpie-site constants.ts), both of
+// which route ONLY {stock, etf, metal} to V3. A wider set here advertised
+// tokens (rwa/equity/commodity/bond/tbill/stocks) as V3 while they actually
+// plain-borrow on V1 → wrong LTV/fee/duration (cross-version surprise).
+// (audit MEDIUM fix.) Narrow to match exactly.
 const RWA_CATEGORIES = new Set([
-  "rwa",
   "stock",
-  "stocks",
-  "equity",
   "etf",
   "metal",
-  "commodity",
-  "bond",
-  "tbill",
 ]);
 
 function strategyForCategory(category?: string) {

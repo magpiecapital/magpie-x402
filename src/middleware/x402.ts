@@ -71,8 +71,12 @@ export function x402Required(config: X402Config): MiddlewareHandler {
     //   standard rail → PAYMENT-SIGNATURE (base64 PaymentPayload)
     const paymentHeader = c.req.header("x-payment");
     const stdSig = c.req.header("payment-signature");
-    // Let browser/agent clients read the standard headers.
-    c.header("Access-Control-Expose-Headers", "PAYMENT-REQUIRED, PAYMENT-SIGNATURE, PAYMENT-RESPONSE");
+    // NOTE: do NOT set Access-Control-Expose-Headers here — app.ts's CORS
+    // middleware already exposes the full set (PAYMENT-REQUIRED,
+    // PAYMENT-RESPONSE, Retry-After, and every X-Payment-Required-*).
+    // Re-setting it here OVERWRITES that list (Hono's c.header replaces, not
+    // appends), dropping the X-Payment-Required-* headers a browser-origin
+    // agent needs to read the native-rail challenge. (audit FIX 4)
 
     // ── Standard x402 v2 SVM rail (gated, fail-closed) ──
     // Only when explicitly enabled (X402_STANDARD_RAIL_ENABLED=true) AND the
@@ -217,9 +221,61 @@ export function x402Required(config: X402Config): MiddlewareHandler {
     if (claim && claim.fresh === false) {
       return c.json({ error: "payment_already_consumed" }, 402);
     }
+    if (claim && claim.fresh === true) {
+      // Single-use proven for the first time — reset the breaker.
+      noteClaimResolved();
+    } else {
+      // null / {} — the durable single-use claim couldn't be established
+      // (missing token, bot/DB blip). FAIL CLOSED by default so a replayed
+      // payment can't be served free data during a blip (the real exposure
+      // is the self-contained data endpoints, which have no on-chain lower
+      // layer). UNLESS the bot is in a PROVEN sustained outage, in which case
+      // the breaker briefly fails OPEN (bounded) so legitimately-paid agents
+      // aren't hard-blocked. The in-process Map still guards same-instance
+      // replay; the 10-min nonce TTL is the hard outer bound. (audit FIX 1 +
+      // feedback_defense_in_depth_failopen_when_lower_layer_proven.)
+      if (claimBreakerVerdict() === "reject") {
+        return c.json({ error: "settlement_claim_unconfirmed", retryable: true }, 402);
+      }
+    }
 
     await next();
   };
+}
+
+// ── Circuit breaker for the durable single-use claim (audit FIX 1) ──
+// When recordPaidCall can't establish freshness (null/{}), the gate FAILS
+// CLOSED to deny replayed payments free data — but a sustained bot/DB outage
+// would then hard-block every paid call. The breaker detects a proven
+// sustained outage (consecutive unresolved claims within a short window) and
+// trips into a BOUNDED fail-open window so legitimately-paid agents keep
+// being served, then re-tests. Warm-instance state is a sufficient
+// degradation signal; the 10-min nonce TTL is the hard outer bound on any
+// replay even while degraded.
+let claimFailWindowStart = 0;
+let claimFailCount = 0;
+let claimDegradedUntilMs = 0;
+const CLAIM_DEGRADE_TRIP_FAILS = 4;
+const CLAIM_DEGRADE_TRIP_WINDOW_MS = 20_000;
+const CLAIM_DEGRADE_OPEN_MS = 60_000;
+
+function claimBreakerVerdict(): "serve" | "reject" {
+  const now = Date.now();
+  if (now < claimDegradedUntilMs) return "serve"; // inside the degraded window
+  if (now - claimFailWindowStart > CLAIM_DEGRADE_TRIP_WINDOW_MS) {
+    claimFailWindowStart = now;
+    claimFailCount = 0;
+  }
+  claimFailCount++;
+  if (claimFailCount >= CLAIM_DEGRADE_TRIP_FAILS) {
+    claimDegradedUntilMs = now + CLAIM_DEGRADE_OPEN_MS;
+    return "serve";
+  }
+  return "reject";
+}
+function noteClaimResolved(): void {
+  claimFailCount = 0;
+  claimDegradedUntilMs = 0;
 }
 
 // Fire-and-forget. Errors swallowed — metrics are best-effort.
