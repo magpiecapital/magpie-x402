@@ -12,13 +12,12 @@
  */
 import {
   Connection,
-  Keypair,
   PublicKey,
   SystemProgram,
   Transaction,
   TransactionInstruction,
-  sendAndConfirmTransaction,
 } from "@solana/web3.js";
+import type { MagpieSigner } from "./envelope.js";
 
 const MEMO_PROGRAM_ID = new PublicKey(
   "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr",
@@ -52,8 +51,9 @@ export class X402Error extends Error {
 export interface X402Context {
   baseUrl: string;
   rpcUrl: string;
-  /** Required for paid endpoints. Free endpoints work without one. */
-  payer?: Keypair;
+  /** Required for paid endpoints (a Keypair, adapted to a MagpieSigner, OR any
+   *  external signer — Privy/Turnkey/embedded/SendAI). Free endpoints work without one. */
+  signer?: MagpieSigner;
   /** Override the default fetch (handy for tests). */
   fetcher?: typeof fetch;
 }
@@ -89,9 +89,9 @@ export async function paidCall<T = unknown>(
   }
 
   // 402 — pay and retry.
-  if (!ctx.payer) {
+  if (!ctx.signer) {
     throw new X402Error(
-      `${path} is a paid endpoint (HTTP 402). Configure a payer keypair to call it.`,
+      `${path} is a paid endpoint (HTTP 402). Configure a keypair or signer to call it.`,
       402,
       null,
     );
@@ -114,7 +114,7 @@ export async function paidCall<T = unknown>(
   const tx = new Transaction();
   tx.add(
     SystemProgram.transfer({
-      fromPubkey: ctx.payer.publicKey,
+      fromPubkey: ctx.signer.publicKey,
       toPubkey: new PublicKey(payTo),
       lamports: amount,
     }),
@@ -126,9 +126,14 @@ export async function paidCall<T = unknown>(
       data: Buffer.from(memo, "utf8"),
     }),
   );
-  const signature = await sendAndConfirmTransaction(connection, tx, [ctx.payer], {
-    commitment: "confirmed",
-  });
+  // Sign via the MagpieSigner (a Keypair adapter signs locally; an external
+  // wallet signs in its own environment — the secret key never reaches us).
+  tx.feePayer = ctx.signer.publicKey;
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
+  tx.recentBlockhash = blockhash;
+  const signedTx = await ctx.signer.signTransaction(tx);
+  const signature = await connection.sendRawTransaction(signedTx.serialize());
+  await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, "confirmed");
 
   // Retry the original request with X-Payment header.
   const retry = await fetcher(url, {

@@ -20,7 +20,22 @@
  *   IssuedAt: 2026-06-20T00:00:00.000Z
  */
 import { createPrivateKey, sign as nodeSign, randomUUID } from "node:crypto";
-import type { Keypair } from "@solana/web3.js";
+import type { Keypair, PublicKey, Transaction, VersionedTransaction } from "@solana/web3.js";
+
+/**
+ * Minimal signer the SDK needs. A raw Keypair satisfies this via
+ * `signerFromKeypair`, but so does any wallet adapter (Privy / Turnkey /
+ * embedded / SendAI BaseWallet) that exposes signing WITHOUT handing over the
+ * secret key — which is what agent frameworks require. The SDK never touches a
+ * raw secret key when constructed with one of these.
+ */
+export interface MagpieSigner {
+  publicKey: PublicKey;
+  /** Sign a transaction in place / return the signed tx. */
+  signTransaction<T extends Transaction | VersionedTransaction>(tx: T): Promise<T>;
+  /** Sign an arbitrary message (the Ed25519 envelope text). Returns the 64-byte signature. */
+  signMessage(message: Uint8Array): Promise<Uint8Array>;
+}
 
 // PKCS8 DER prefix for an Ed25519 private key (RFC 8410). The 32-byte seed
 // follows, giving a 48-byte DER we can hand to Node's createPrivateKey.
@@ -59,6 +74,28 @@ function signEd25519(message: Uint8Array, keypair: Keypair): Buffer {
   return nodeSign(null, Buffer.from(message), key);
 }
 
+/** Adapt a raw Keypair to a MagpieSigner (back-compat path; signs locally). */
+export function signerFromKeypair(keypair: Keypair): MagpieSigner {
+  return {
+    publicKey: keypair.publicKey,
+    // eslint-disable-next-line @typescript-eslint/require-await
+    signTransaction: async (tx) => {
+      // partialSign exists on both legacy Transaction; VersionedTransaction uses sign().
+      const anyTx = tx as unknown as { partialSign?: (kp: Keypair) => void; sign?: (kps: Keypair[]) => void };
+      if (typeof anyTx.partialSign === "function") anyTx.partialSign(keypair);
+      else if (typeof anyTx.sign === "function") anyTx.sign([keypair]);
+      return tx;
+    },
+    // eslint-disable-next-line @typescript-eslint/require-await
+    signMessage: async (message) => signEd25519(message, keypair),
+  };
+}
+
+/** Accept either a raw Keypair or a MagpieSigner. */
+function toSigner(s: Keypair | MagpieSigner): MagpieSigner {
+  return "secretKey" in s ? signerFromKeypair(s) : s;
+}
+
 export interface SignedEnvelope {
   signedMessageBase64: string;
   signatureBase58: string;
@@ -90,14 +127,14 @@ export function envelopeHeaders(env: SignedEnvelope): Record<string, string> {
  * X-Magpie-Env-* headers. `orderId` is included only for order-scoped
  * actions (get / modify / cancel) so the signature binds the target order.
  */
-export function buildManagementHeaders(
-  keypair: Keypair,
+export async function buildManagementHeaders(
+  signer: Keypair | MagpieSigner,
   action: string,
   orderId?: string,
-): Record<string, string> {
+): Promise<Record<string, string>> {
   const fields: Record<string, string | undefined> = {};
   if (orderId !== undefined) fields.OrderId = orderId;
-  return envelopeHeaders(buildSignedEnvelope(keypair, action, fields));
+  return envelopeHeaders(await buildSignedEnvelope(signer, action, fields));
 }
 
 /**
@@ -105,28 +142,29 @@ export function buildManagementHeaders(
  * automatically (unless you override them) — the bot requires all three and
  * enforces a 5-minute freshness window on IssuedAt + nonce-uniqueness.
  */
-export function buildSignedEnvelope(
-  keypair: Keypair,
+export async function buildSignedEnvelope(
+  s: Keypair | MagpieSigner,
   magpieHeader: string,
   fields: Record<string, string | number | undefined | null>,
-): SignedEnvelope {
-  const signer = keypair.publicKey.toBase58();
+): Promise<SignedEnvelope> {
+  const signer = toSigner(s);
+  const from = signer.publicKey.toBase58();
   const merged: Record<string, string | number | undefined | null> = {
     Nonce: randomUUID(),
     IssuedAt: new Date().toISOString(),
     ...fields,
   };
-  const lines: string[] = [`magpie: ${magpieHeader}`, `From: ${signer}`];
+  const lines: string[] = [`magpie: ${magpieHeader}`, `From: ${from}`];
   for (const [k, v] of Object.entries(merged)) {
     if (v === undefined || v === null || v === "") continue;
     lines.push(`${k}: ${v}`);
   }
   const text = lines.join("\n");
   const messageBytes = new TextEncoder().encode(text);
-  const sig = signEd25519(messageBytes, keypair);
+  const sig = await signer.signMessage(messageBytes);
   return {
     signedMessageBase64: Buffer.from(messageBytes).toString("base64"),
     signatureBase58: base58Encode(sig),
-    signerPubkey: signer,
+    signerPubkey: from,
   };
 }

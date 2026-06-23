@@ -36,7 +36,8 @@
  */
 import { Connection, Keypair, PublicKey, Transaction } from "@solana/web3.js";
 import { freeGet, paidCall, X402Context, X402Error } from "./x402.js";
-import { buildSignedEnvelope, buildManagementHeaders } from "./envelope.js";
+import { buildSignedEnvelope, buildManagementHeaders, signerFromKeypair } from "./envelope.js";
+import type { MagpieSigner } from "./envelope.js";
 
 export { X402Error };
 export { verifyWebhookSignature, IntentMatchedPayload } from "./webhooks.js";
@@ -188,8 +189,19 @@ export interface IntentResult {
 }
 
 export interface MagpieAgentOptions {
-  /** The agent's signing keypair. Required for paid actions. */
+  /**
+   * The agent's signing keypair (back-compat path; the SDK signs locally).
+   * Provide EITHER this OR `signer`. Required for paid actions if `signer`
+   * is not given.
+   */
   keypair?: Keypair;
+  /**
+   * An external signer — Privy / Turnkey / embedded / SendAI BaseWallet, or
+   * anything implementing { publicKey, signTransaction, signMessage }. Use this
+   * when the agent's key lives in a wallet service and a raw Keypair is never
+   * available. Takes precedence over `keypair`. The SDK never sees the secret key.
+   */
+  signer?: MagpieSigner;
   /** Solana RPC URL. Defaults to the public mainnet endpoint (rate-limited). */
   rpcUrl?: string;
   /** Magpie x402 service URL. Defaults to x402.magpie.capital. */
@@ -208,23 +220,26 @@ export interface MagpieAgentOptions {
  * (each does its own RPC + payment).
  */
 export class MagpieAgent {
-  private readonly keypair?: Keypair;
+  private readonly signer?: MagpieSigner;
   private readonly siteUrl: string;
   private readonly ctx: X402Context;
 
   constructor(opts: MagpieAgentOptions = {}) {
-    this.keypair = opts.keypair;
+    // `signer` (external wallet) wins; otherwise adapt a raw Keypair. Either
+    // way the rest of the SDK only ever touches the MagpieSigner abstraction —
+    // it never reaches for a secret key.
+    this.signer = opts.signer ?? (opts.keypair ? signerFromKeypair(opts.keypair) : undefined);
     this.siteUrl = (opts.siteUrl ?? DEFAULT_SITE_URL).replace(/\/$/, "");
     this.ctx = {
       baseUrl: (opts.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, ""),
       rpcUrl: opts.rpcUrl ?? DEFAULT_RPC_URL,
-      payer: this.keypair,
+      signer: this.signer,
     };
   }
 
-  /** Returns the public key of the configured keypair (if any). */
+  /** Returns the public key of the configured signer (if any). */
   publicKey(): PublicKey | undefined {
-    return this.keypair?.publicKey;
+    return this.signer?.publicKey;
   }
 
   // ── Reads ──────────────────────────────────────────────────────────
@@ -383,7 +398,7 @@ export class MagpieAgent {
      */
     hasExitArming?: boolean;
   }): Promise<BorrowResult> {
-    const keypair = this.requireKeypair("borrow");
+    const keypair = this.requireSigner("borrow");
     const mint =
       typeof opts.collateralMint === "string"
         ? opts.collateralMint
@@ -403,8 +418,8 @@ export class MagpieAgent {
     });
 
     const tx = Transaction.from(Buffer.from(built.data.partial_signed_tx_b64, "base64"));
-    tx.partialSign(keypair);
-    const signedB64 = tx.serialize({ requireAllSignatures: false }).toString("base64");
+    const signedTx = await keypair.signTransaction(tx);
+    const signedB64 = signedTx.serialize({ requireAllSignatures: false }).toString("base64");
 
     // Validate the cosign URL origin BEFORE posting the signed tx
     // bytes. The x402 service returns next_step.url; if x402 were
@@ -445,7 +460,7 @@ export class MagpieAgent {
    * submit → wait for confirmation → return.
    */
   async deposit(opts: { lamports: bigint | string | number }): Promise<DepositResult> {
-    const keypair = this.requireKeypair("deposit");
+    const keypair = this.requireSigner("deposit");
     const lamports = BigInt(opts.lamports);
     const built = await paidCall<{
       partial_signed_tx_b64: string;
@@ -473,7 +488,7 @@ export class MagpieAgent {
    * max_safe_shares the server returns.
    */
   async withdraw(opts: { shares: bigint | string }): Promise<WithdrawResult> {
-    const keypair = this.requireKeypair("withdraw");
+    const keypair = this.requireSigner("withdraw");
     const shares = BigInt(opts.shares);
     const built = await paidCall<{
       partial_signed_tx_b64: string;
@@ -501,7 +516,7 @@ export class MagpieAgent {
    * Discover targets via `liquidatable()`.
    */
   async liquidate(opts: { loanPda: PublicKey | string }): Promise<LiquidateResult> {
-    const keypair = this.requireKeypair("liquidate");
+    const keypair = this.requireSigner("liquidate");
     const loanPda =
       typeof opts.loanPda === "string" ? opts.loanPda : opts.loanPda.toBase58();
     const built = await paidCall<{
@@ -535,7 +550,7 @@ export class MagpieAgent {
    * `walletLoans()`.
    */
   async repay(opts: { loanPda: PublicKey | string }): Promise<RepayResult> {
-    const keypair = this.requireKeypair("repay");
+    const keypair = this.requireSigner("repay");
     const loanPda =
       typeof opts.loanPda === "string" ? opts.loanPda : opts.loanPda.toBase58();
     const built = await paidCall<{
@@ -568,7 +583,7 @@ export class MagpieAgent {
     expiresInSeconds?: number;
     webhookUrl?: string;
   }): Promise<IntentResult> {
-    const keypair = this.requireKeypair("createIntent");
+    const keypair = this.requireSigner("createIntent");
     const mint =
       typeof opts.collateralMint === "string"
         ? opts.collateralMint
@@ -638,10 +653,10 @@ export class MagpieAgent {
    * wallet, so a leaked intent id alone can never cancel your intent.
    */
   async cancelIntent(intentId: string): Promise<void> {
-    const keypair = this.requireKeypair("cancelIntent");
+    const keypair = this.requireSigner("cancelIntent");
     await paidCall(this.ctx, "DELETE", "/api/v1/agent/intent", {
       query: { id: intentId },
-      headers: buildManagementHeaders(keypair, "intent-cancel/v1", intentId),
+      headers: await buildManagementHeaders(keypair, "intent-cancel/v1", intentId),
     });
   }
 
@@ -670,7 +685,7 @@ export class MagpieAgent {
     dest?: "sol" | "usdc";
     slice?: string;
   }): Promise<ExitOrderResult> {
-    const keypair = this.requireKeypair("armExit");
+    const keypair = this.requireSigner("armExit");
     if (
       opts.target === undefined &&
       opts.priceUsd === undefined &&
@@ -679,7 +694,7 @@ export class MagpieAgent {
     ) {
       throw new Error("armExit: supply one of target, priceUsd, mcUsd, or trailingBps.");
     }
-    const env = buildSignedEnvelope(keypair, "limit-close-arm/v1", {
+    const env = await buildSignedEnvelope(keypair, "limit-close-arm/v1", {
       LoanId: String(opts.loanId),
       Direction: opts.direction,
       Target: opts.target,
@@ -709,8 +724,8 @@ export class MagpieAgent {
     dest?: "sol" | "usdc";
     trailingBps?: number;
   }): Promise<ExitOrderResult> {
-    const keypair = this.requireKeypair("modifyExit");
-    const env = buildSignedEnvelope(keypair, "limit-close-modify/v1", {
+    const keypair = this.requireSigner("modifyExit");
+    const env = await buildSignedEnvelope(keypair, "limit-close-modify/v1", {
       OrderId: opts.orderId,
       Price: opts.priceUsd,
       MC: opts.mcUsd,
@@ -730,8 +745,8 @@ export class MagpieAgent {
 
   /** Cancel an armed exit on your own loan. Free. */
   async cancelExit(orderId: string): Promise<ExitOrderResult> {
-    const keypair = this.requireKeypair("cancelExit");
-    const env = buildSignedEnvelope(keypair, "limit-close-cancel/v1", { OrderId: orderId });
+    const keypair = this.requireSigner("cancelExit");
+    const env = await buildSignedEnvelope(keypair, "limit-close-cancel/v1", { OrderId: orderId });
     const r = await paidCall<Record<string, unknown>>(
       this.ctx,
       "POST",
@@ -780,7 +795,7 @@ export class MagpieAgent {
     expiresAt?: string | null;
     autoEscalateSlippage?: boolean;
   }): Promise<ExitOrderResult> {
-    this.requireKeypair("armDelegatedExit");
+    this.requireSigner("armDelegatedExit");
     const userWallet =
       typeof opts.userWallet === "string" ? opts.userWallet : opts.userWallet.toBase58();
     const body: Record<string, unknown> = {
@@ -818,7 +833,7 @@ export class MagpieAgent {
     expiresAt?: string | null;
     autoEscalateSlippage?: boolean;
   }): Promise<Record<string, unknown>> {
-    const keypair = this.requireKeypair("preflightDelegatedExit");
+    const keypair = this.requireSigner("preflightDelegatedExit");
     const userWallet =
       typeof opts.userWallet === "string" ? opts.userWallet : opts.userWallet.toBase58();
     const body: Record<string, unknown> = {
@@ -836,7 +851,7 @@ export class MagpieAgent {
       this.ctx,
       "POST",
       "/api/v1/agent/limit-close/preflight",
-      { body, headers: buildManagementHeaders(keypair, "limit-close-preflight/v1") },
+      { body, headers: await buildManagementHeaders(keypair, "limit-close-preflight/v1") },
     );
     return r.data;
   }
@@ -846,12 +861,12 @@ export class MagpieAgent {
    * envelope bound to the order id.
    */
   async getDelegatedExit(orderId: string): Promise<Record<string, unknown>> {
-    const keypair = this.requireKeypair("getDelegatedExit");
+    const keypair = this.requireSigner("getDelegatedExit");
     return freeGet(
       this.ctx,
       "/api/v1/agent/limit-close",
       { id: orderId },
-      buildManagementHeaders(keypair, "limit-close-get/v1", orderId),
+      await buildManagementHeaders(keypair, "limit-close-get/v1", orderId),
     );
   }
 
@@ -860,14 +875,14 @@ export class MagpieAgent {
    * envelope. `status: "all"` includes terminal orders (default armed-only).
    */
   async listDelegatedExits(opts: { status?: "armed" | "all" } = {}): Promise<{ orders: unknown[] }> {
-    const keypair = this.requireKeypair("listDelegatedExits");
+    const keypair = this.requireSigner("listDelegatedExits");
     const query: Record<string, string> = {};
     if (opts.status === "all") query.status = "all";
     return freeGet(
       this.ctx,
       "/api/v1/agent/limit-close/list",
       query,
-      buildManagementHeaders(keypair, "limit-close-list/v1"),
+      await buildManagementHeaders(keypair, "limit-close-list/v1"),
     );
   }
 
@@ -876,12 +891,12 @@ export class MagpieAgent {
    * Signs a "limit-close-delegations/v1" envelope.
    */
   async listDelegations(): Promise<Record<string, unknown>> {
-    const keypair = this.requireKeypair("listDelegations");
+    const keypair = this.requireSigner("listDelegations");
     return freeGet(
       this.ctx,
       "/api/v1/agent/limit-close/delegations",
       {},
-      buildManagementHeaders(keypair, "limit-close-delegations/v1"),
+      await buildManagementHeaders(keypair, "limit-close-delegations/v1"),
     );
   }
 
@@ -891,12 +906,12 @@ export class MagpieAgent {
    * "limit-close-eligible/v1" envelope.
    */
   async eligibleLoans(): Promise<Record<string, unknown>> {
-    const keypair = this.requireKeypair("eligibleLoans");
+    const keypair = this.requireSigner("eligibleLoans");
     return freeGet(
       this.ctx,
       "/api/v1/agent/limit-close/eligible-loans",
       {},
-      buildManagementHeaders(keypair, "limit-close-eligible/v1"),
+      await buildManagementHeaders(keypair, "limit-close-eligible/v1"),
     );
   }
 
@@ -911,7 +926,7 @@ export class MagpieAgent {
     sellDestination?: "sol" | "usdc";
     expiresAt?: string | null;
   }): Promise<Record<string, unknown>> {
-    const keypair = this.requireKeypair("modifyDelegatedExit");
+    const keypair = this.requireSigner("modifyDelegatedExit");
     const body: Record<string, unknown> = { id: opts.orderId };
     if (opts.triggerValueMicro !== undefined) body.trigger_value_micro = String(opts.triggerValueMicro);
     if (opts.slippageBps !== undefined) body.slippage_bps = opts.slippageBps;
@@ -921,7 +936,7 @@ export class MagpieAgent {
       this.ctx,
       "POST",
       "/api/v1/agent/limit-close/modify",
-      { body, headers: buildManagementHeaders(keypair, "limit-close-modify/v1", opts.orderId) },
+      { body, headers: await buildManagementHeaders(keypair, "limit-close-modify/v1", opts.orderId) },
     );
     return r.data;
   }
@@ -932,43 +947,43 @@ export class MagpieAgent {
    * identity here would silently disarm a borrower's stop-loss).
    */
   async cancelDelegatedExit(orderId: string): Promise<Record<string, unknown>> {
-    const keypair = this.requireKeypair("cancelDelegatedExit");
+    const keypair = this.requireSigner("cancelDelegatedExit");
     const r = await paidCall<Record<string, unknown>>(
       this.ctx,
       "DELETE",
       "/api/v1/agent/limit-close",
-      { query: { id: orderId }, headers: buildManagementHeaders(keypair, "limit-close-cancel/v1", orderId) },
+      { query: { id: orderId }, headers: await buildManagementHeaders(keypair, "limit-close-cancel/v1", orderId) },
     );
     return r.data;
   }
 
   // ── Internal helpers ───────────────────────────────────────────────
 
-  private async signAndSubmit(partialTxB64: string, keypair: Keypair): Promise<string> {
+  private async signAndSubmit(partialTxB64: string, signer: MagpieSigner): Promise<string> {
     const tx = Transaction.from(Buffer.from(partialTxB64, "base64"));
-    tx.partialSign(keypair);
+    const signedTx = await signer.signTransaction(tx);
     const connection = new Connection(this.ctx.rpcUrl, "confirmed");
-    const sig = await connection.sendRawTransaction(tx.serialize());
+    const sig = await connection.sendRawTransaction(signedTx.serialize());
     await connection.confirmTransaction(sig, "confirmed");
     return sig;
   }
 
-  private requireKeypair(action: string): Keypair {
-    if (!this.keypair) {
+  private requireSigner(action: string): MagpieSigner {
+    if (!this.signer) {
       throw new Error(
-        `MagpieAgent.${action}() requires a keypair. Construct with { keypair }.`,
+        `MagpieAgent.${action}() requires a signer. Construct with { keypair } or { signer }.`,
       );
     }
-    return this.keypair;
+    return this.signer;
   }
 
   private requireSelf(): string {
-    if (!this.keypair) {
+    if (!this.signer) {
       throw new Error(
-        "No default wallet — pass an explicit wallet pubkey or construct MagpieAgent with a keypair.",
+        "No default wallet — pass an explicit wallet pubkey or construct MagpieAgent with a keypair or signer.",
       );
     }
-    return this.keypair.publicKey.toBase58();
+    return this.signer.publicKey.toBase58();
   }
 
   /**
