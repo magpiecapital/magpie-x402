@@ -68,6 +68,39 @@ export function x402Required(config: X402Config): MiddlewareHandler {
       const memo = `magpie-x402:${nonce}`;
       return c.json(
         {
+          // ── Standard x402 conformance (additive) ──
+          // The official x402 PaymentRequired schema (x402Version + accepts[])
+          // is what every standard x402 client library + discovery index
+          // (402index, x402scan, CDP Bazaar, …) validates against. Without it,
+          // a standard agent gets a 402 it can't parse and the indexes won't
+          // list us — the real blocker to agent discovery. We emit BOTH the
+          // standard fields AND our original custom fields below, so our own
+          // SDK/MCP keep working byte-for-byte while standard agents can now
+          // parse + discover us. Settlement is native-SOL + memo (described in
+          // accepts[0].extra) rather than the SPL/"exact" default — sophisticated
+          // clients read extra; full SPL-settlement interop is a separate change.
+          x402Version: 1,
+          accepts: [
+            {
+              scheme: "exact",
+              network: "solana",
+              maxAmountRequired: config.amountLamports.toString(),
+              resource: c.req.url,
+              description: config.label ?? "Magpie x402 paid endpoint",
+              mimeType: "application/json",
+              payTo: payToKey.toBase58(),
+              maxTimeoutSeconds: Math.round(NONCE_TTL_MS / 1000),
+              asset: "So11111111111111111111111111111111111111112",
+              extra: {
+                settlement: "native-sol",
+                memo,
+                note:
+                  "Transfer maxAmountRequired lamports of NATIVE SOL to payTo " +
+                  'with this memo, then retry with header "X-Payment: <tx_signature>".',
+              },
+            },
+          ],
+          // ── Original Magpie custom fields (unchanged — our SDK/MCP read these) ──
           error: "payment_required",
           scheme: "x402/solana/v1",
           payTo: payToKey.toBase58(),
