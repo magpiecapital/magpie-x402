@@ -209,19 +209,26 @@ async function verifySplSettlementOnChain(
   }
   if (!tx || tx.meta?.err) return null;
 
-  // Pin the asset DEFINITIVELY. A bare SPL `transfer` carries no mint in its
-  // parsed info, so the destination-ATA match alone is necessary-but-not-
-  // sufficient proof. Confirm via the tx's on-chain token balances that OUR
-  // payTo owns a `reqd.asset` token account touched by this tx — leaving no
-  // way to credit a different mint.
+  // Asset pinning. The destination-ATA match in the loop below is already
+  // structurally sufficient: `expectedAta` is derived from (payTo, reqd.asset)
+  // and an ATA can ONLY ever hold its own mint, so a non-errored transfer of
+  // >= the amount into expectedAta definitively credits reqd.asset to payTo.
+  // The tx's token balances are used as EXTRA corroboration when the RPC
+  // populated them — but we must NOT hard-require them: some providers / tx
+  // shapes omit pre/postTokenBalances, and a hard gate there would falsely
+  // reject a legitimately-settled payment (charged-but-denied). So: reject ONLY
+  // when balances ARE present and CONTRADICT (none credit reqd.asset to payTo);
+  // when absent, fall through to the structurally-sufficient loop.
   const tokenBalances = [
     ...(tx.meta?.postTokenBalances ?? []),
     ...(tx.meta?.preTokenBalances ?? []),
   ];
-  const payToOwnsReqdAsset = tokenBalances.some(
-    (b) => b.mint === reqd.asset && b.owner === getPayTo(),
-  );
-  if (!payToOwnsReqdAsset) return null;
+  if (
+    tokenBalances.length > 0 &&
+    !tokenBalances.some((b) => b.mint === reqd.asset && b.owner === getPayTo())
+  ) {
+    return null;
+  }
 
   const top = tx.transaction.message.instructions || [];
   const inner = (tx.meta?.innerInstructions || []).flatMap((i) => i.instructions);
