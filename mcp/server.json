@@ -1,0 +1,43 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.magpiecapital/magpie-mcp",
+  "description": "Tools for Magpie's x402 permissionless agent lending on Solana: borrow, intents, in-vault exits.",
+  "version": "0.1.2",
+  "websiteUrl": "https://x402.magpie.capital",
+  "repository": {
+    "url": "https://github.com/magpiecapital/magpie-x402",
+    "source": "github",
+    "subfolder": "mcp"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "@magpieloans/magpie-mcp",
+      "version": "0.1.2",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "SOLANA_RPC_URL",
+          "description": "Solana RPC endpoint used to send x402 payment transactions. Use a paid Helius/Triton/QuickNode URL for production traffic; the public mainnet-beta endpoint rate-limits.",
+          "isRequired": false,
+          "default": "https://api.mainnet-beta.solana.com"
+        },
+        {
+          "name": "MAGPIE_X402_BASE_URL",
+          "description": "The Magpie x402 service base URL. Override only for self-hosted or testnet deployments.",
+          "isRequired": false,
+          "default": "https://x402.magpie.capital"
+        },
+        {
+          "name": "MAGPIE_MCP_PAYER_KEYPAIR",
+          "description": "Optional path to a Solana keypair JSON (solana-keygen id.json format). Enables paid tools; the key signs locally and never leaves your machine. Omit to run the free read-only tools.",
+          "isRequired": false,
+          "isSecret": true
+        }
+      ]
+    }
+  ]
+}

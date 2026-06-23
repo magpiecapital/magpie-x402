@@ -1,5 +1,7 @@
 # magpie-mcp
 
+<!-- mcp-name: io.github.magpiecapital/magpie-mcp -->
+
 **MCP server exposing the Magpie Capital x402 API as native tools for Claude Desktop, Cursor, Windsurf, ChatGPT desktop, and any other MCP-aware agent host.**
 
 Drop one config block into your host and your agent can query Magpie's protocol state, simulate borrows, fetch credit scores, build deposit/withdraw transactions, post conditional borrow intents, and arm self-owned in-vault take-profit / stop-loss exits on its own loans — all as first-class tool calls. No bespoke client code, no API keys.
