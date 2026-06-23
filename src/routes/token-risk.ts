@@ -25,7 +25,7 @@ import { PublicKey } from "@solana/web3.js";
  * lookups that compress meaningful protocol intelligence into a
  * single tier-decision input.
  */
-const BOT_API = process.env.MAGPIE_BOT_API || "https://api.magpie.capital";
+const BOT_API = process.env.MAGPIE_BOT_API || "https://magpie-bot-production.up.railway.app";
 
 export async function tokenRiskHandler(c: Context) {
   const mint = c.req.query("mint") ?? "";

@@ -53,7 +53,7 @@ const FACILITATOR_FALLBACK = process.env.X402_FACILITATOR_URL_FALLBACK || "https
 const FACILITATOR_ALLOWLIST = new Set([FACILITATOR_PRIMARY, FACILITATOR_FALLBACK].map(hostOf));
 const SOL_USD_RATE = Number(process.env.X402_SOL_USD_RATE || "150"); // USDC pricing default; refine via oracle later
 const WSOL_ENABLED = process.env.X402_WSOL_ACCEPT_ENABLED !== "false"; // gate wSOL until mainnet settle-tested
-const BOT_API = process.env.MAGPIE_BOT_API || "https://api.magpie.capital";
+const BOT_API = process.env.MAGPIE_BOT_API || "https://magpie-bot-production.up.railway.app";
 const INTERNAL_TOKEN = process.env.INTERNAL_API_TOKEN || "";
 
 function hostOf(u: string): string {

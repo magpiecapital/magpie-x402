@@ -35,7 +35,7 @@ import { enforcePayerMatchesWallet } from "../lib/payer-bind.js";
  * repay (the agent's own submit still simulates on the validator).
  */
 
-const BOT_API = process.env.MAGPIE_BOT_API || "https://api.magpie.capital";
+const BOT_API = process.env.MAGPIE_BOT_API || "https://magpie-bot-production.up.railway.app";
 const INTERNAL_TOKEN = process.env.INTERNAL_API_TOKEN || "";
 const RPC_URL = process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com";
 
