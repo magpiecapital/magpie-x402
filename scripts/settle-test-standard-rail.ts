@@ -146,9 +146,24 @@ async function main() {
   };
   const paymentSignature = Buffer.from(JSON.stringify(paymentPayload)).toString("base64");
 
+  // DIRECT mode: call PayAI itself (bypass Magpie) on a FRESH tx, timed, to see
+  // PayAI's first-settle behavior in isolation.
+  if (process.env.DIRECT) {
+    const fbody = JSON.stringify({ x402Version: 2, paymentPayload, paymentRequirements: accept });
+    const t0 = Date.now();
+    const fv = await fetch("https://facilitator.payai.network/verify", { method: "POST", headers: { "content-type": "application/json" }, body: fbody });
+    console.log(`\nDIRECT PayAI /verify → ${fv.status} (${Date.now() - t0}ms): ${(await fv.text()).slice(0, 250)}`);
+    const t1 = Date.now();
+    const fs = await fetch("https://facilitator.payai.network/settle", { method: "POST", headers: { "content-type": "application/json" }, body: fbody });
+    console.log(`DIRECT PayAI /settle → ${fs.status} (${Date.now() - t1}ms): ${(await fs.text()).slice(0, 400)}`);
+    return;
+  }
+
+  const tR = Date.now();
   const r2 = await fetch(new URL(ENDPOINT, BASE), {
     headers: { "PAYMENT-SIGNATURE": paymentSignature },
   });
+  console.log(`(Magpie retry took ${Date.now() - tR}ms)`);
   const body = await r2.text();
   const payResp = r2.headers.get("payment-response");
   console.log(`retry status: ${r2.status}`);
