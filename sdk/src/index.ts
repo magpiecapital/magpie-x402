@@ -42,6 +42,11 @@ import type { MagpieSigner } from "./envelope.js";
 export { X402Error };
 export { verifyWebhookSignature, IntentMatchedPayload } from "./webhooks.js";
 export { buildSignedEnvelope, buildManagementHeaders, envelopeHeaders, SignedEnvelope } from "./envelope.js";
+// External-signer surface — implement `MagpieSigner` for a Privy/Turnkey/SendAI
+// BaseWallet (or wrap a raw Keypair with `signerFromKeypair`) and pass it as
+// `new MagpieAgent({ signer })`.
+export { signerFromKeypair } from "./envelope.js";
+export type { MagpieSigner } from "./envelope.js";
 
 const DEFAULT_BASE_URL = "https://x402.magpie.capital";
 const DEFAULT_RPC_URL = "https://api.mainnet-beta.solana.com";
