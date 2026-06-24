@@ -10,11 +10,17 @@ export interface AgentConfig {
   /** Magpie x402 base URL. */
   baseUrl: string;
 
-  /** HARD allowlist of mints the agent may buy. Empty in dry-run = "auto-pick one memecoin to illustrate". */
+  /** HARD allowlist of mints the agent may buy. Empty in dry-run = "auto-pick one to illustrate". */
   mintAllowlist: string[];
+  /**
+   * When LIVE with an EMPTY allowlist: false = buy nothing (safest). true = let the
+   * brain pick from Magpie's full approved-collateral catalog (already a vetted
+   * allowlist), still risk-gated. Set OPEN_UNIVERSE=true for an actively-trading agent.
+   */
+  openUniverse: boolean;
   /** Reject any candidate whose Magpie token-risk score exceeds this (0-100, lower = safer). */
   maxTokenRisk: number;
-  /** Preferred collateral class. 'rwa' is the materially safer path. */
+  /** Preferred collateral class. 'rwa' is the materially safer path; 'any' = memecoins + RWAs. */
   preferredCategory: "rwa" | "memecoin" | "any";
 
   /** Borrow tier. express=2d, quick=3d, standard=7d term. */
@@ -24,6 +30,8 @@ export interface AgentConfig {
 
   /** Never run more than this many loans (deadlines) at once. */
   maxOpenLoans: number;
+  /** Hard cap on SOL spent per buy (lamports). 0 = no cap beyond the solvency reserve. */
+  maxBuyLamports: bigint;
   /**
    * Repay this far before due, as a FRACTION of the loan term (0.5 = repay at
    * the halfway point). Wide leads survive RPC blips + retries. Also bounded
@@ -43,9 +51,27 @@ export interface AgentConfig {
 
   /** How often the loan guardian wakes to check deadlines (ms). */
   guardianIntervalMs: number;
+  /**
+   * How often the trading brain wakes to (maybe) open a new position (ms). The agent
+   * runs continuously: every cycle it researches + acts within the safety rails, then
+   * sleeps this long. Default 30 min. 0 = one cycle then idle (the guardian keeps running).
+   */
+  cycleIntervalMs: number;
+
+  /** Passive monitoring — DM every action to Telegram. Empty token = console only. */
+  notify: { telegramToken: string; telegramChatId: string };
+}
+
+/** Where the agent's signing key can come from (file path for local, secret for env/Railway). */
+export function loadKeySources(): { secret?: string; path?: string } {
+  return {
+    secret: process.env.MAGPIE_PAYER_SECRET, // bs58 or JSON array — for Railway/env deploys
+    path: process.env.MAGPIE_PAYER_KEYPAIR ?? process.env.X402_PAYER_KEYPAIR, // local file path
+  };
 }
 
 export function loadConfig(): AgentConfig {
+  const num = (v: string | undefined, d: number) => (v == null || v === "" ? d : Number(v));
   return {
     dryRun: !(process.env.LIVE === "1"),
     rpcUrl: process.env.SOLANA_RPC_URL ?? "https://api.mainnet-beta.solana.com",
@@ -55,19 +81,27 @@ export function loadConfig(): AgentConfig {
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean),
-    maxTokenRisk: Number(process.env.MAX_TOKEN_RISK ?? 60),
+    openUniverse: process.env.OPEN_UNIVERSE === "true",
+    maxTokenRisk: num(process.env.MAX_TOKEN_RISK, 60),
     preferredCategory: (process.env.PREFERRED_CATEGORY as AgentConfig["preferredCategory"]) ?? "rwa",
 
     tier: (process.env.TIER as AgentConfig["tier"]) ?? "standard", // longest term = most repay headroom
     useV4Exits: process.env.USE_V4_EXITS !== "false",
 
-    maxOpenLoans: Number(process.env.MAX_OPEN_LOANS ?? 1),
-    repayLeadFraction: Number(process.env.REPAY_LEAD_FRACTION ?? 0.5),
-    repayLeadSecondsMin: Number(process.env.REPAY_LEAD_SECONDS_MIN ?? 6 * 3600), // >= 6h before due
+    maxOpenLoans: num(process.env.MAX_OPEN_LOANS, 1),
+    maxBuyLamports: BigInt(Math.round(num(process.env.MAX_BUY_SOL, 0) * 1e9)),
+    repayLeadFraction: num(process.env.REPAY_LEAD_FRACTION, 0.5),
+    repayLeadSecondsMin: num(process.env.REPAY_LEAD_SECONDS_MIN, 6 * 3600), // >= 6h before due
 
     gasBufferLamports: BigInt(process.env.GAS_BUFFER_LAMPORTS ?? 30_000_000), // 0.03 SOL
     allowRecursiveRedeploy: process.env.ALLOW_RECURSIVE_REDEPLOY === "true",
 
-    guardianIntervalMs: Number(process.env.GUARDIAN_INTERVAL_MS ?? 10 * 60_000), // every 10 min
+    guardianIntervalMs: num(process.env.GUARDIAN_INTERVAL_MS, 10 * 60_000), // every 10 min
+    cycleIntervalMs: num(process.env.CYCLE_INTERVAL_MIN, 30) * 60_000, // every 30 min
+
+    notify: {
+      telegramToken: process.env.AGENT_NOTIFY_TELEGRAM_TOKEN ?? "",
+      telegramChatId: process.env.AGENT_NOTIFY_TELEGRAM_CHAT ?? "",
+    },
   };
 }

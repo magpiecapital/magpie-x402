@@ -1,39 +1,58 @@
 /**
- * agent.ts — the orchestrator. Wires the four parts into one bounded agent:
+ * agent.ts — the orchestrator. Wires the parts into one continuous, bounded agent:
  *
  *   BRAIN (pick) → BUY (Jupiter) → COLLATERALIZE (Magpie) → GUARD (never default)
  *
- * Safe by default (dry-run). The LoanGuardian starts FIRST and runs for the
- * whole process lifetime, so even pre-existing loans are protected immediately.
+ * Runs CONTINUOUSLY: the LoanGuardian protects every open loan for the whole
+ * process lifetime, and a research cycle fires every CYCLE_INTERVAL_MIN to maybe
+ * open a new position — always inside the solvency reserve + maxOpenLoans rails.
+ * Safe by default (dry-run). Every action is DM'd via the Notifier so you can
+ * watch it passively.
+ *
  * Run:
- *   # rehearse, free, nothing moves:
+ *   # rehearse continuously, free, nothing moves:
  *   MAGPIE_PAYER_KEYPAIR=~/id.json npx tsx examples/autonomous-agent/agent.ts
- *   # live (reads MINT_ALLOWLIST; spends real funds):
- *   LIVE=1 MINT_ALLOWLIST=<mint> MAGPIE_PAYER_KEYPAIR=~/id.json npx tsx examples/autonomous-agent/agent.ts
+ *   # live (spends real funds from the agent wallet):
+ *   LIVE=1 OPEN_UNIVERSE=true PREFERRED_CATEGORY=any \
+ *     MAGPIE_PAYER_SECRET=<bs58|json> npx tsx examples/autonomous-agent/agent.ts
  */
 import { Keypair } from "@solana/web3.js";
 import { readFileSync } from "node:fs";
+import bs58 from "bs58";
 import { MagpieAgent } from "@magpieloans/magpie-agent";
-import { loadConfig } from "./config.js";
+import { loadConfig, loadKeySources } from "./config.js";
 import { LoanGuardian } from "./loan-guardian.js";
 import { jupiterBuy } from "./jupiter.js";
 import { brainEnabled, chooseCandidateWithClaude } from "./brain.js";
+import { Notifier } from "./notifier.js";
 import { RULES } from "./magpie-playbook.js";
 
 const log = (s = "") => console.log(s);
 const cfg = loadConfig();
 
-/** ESM-safe keypair load (mirrors example 11; avoids the lib helper's require()). */
-function loadKeypair(path: string): Keypair {
-  const p = path.replace(/^~/, process.env.HOME || "");
-  return Keypair.fromSecretKey(new Uint8Array(JSON.parse(readFileSync(p, "utf8")) as number[]));
+/**
+ * Load the agent's signing key from EITHER an env secret (MAGPIE_PAYER_SECRET —
+ * bs58 string or JSON byte array; ideal for Railway) OR a local file path
+ * (MAGPIE_PAYER_KEYPAIR). The key only ever lives in this process; Magpie never sees it.
+ */
+function loadKeypair(): Keypair {
+  const { secret, path } = loadKeySources();
+  if (secret && secret.trim()) {
+    const s = secret.trim();
+    if (s.startsWith("[")) return Keypair.fromSecretKey(new Uint8Array(JSON.parse(s) as number[]));
+    return Keypair.fromSecretKey(bs58.decode(s));
+  }
+  if (path) {
+    const p = path.replace(/^~/, process.env.HOME || "");
+    return Keypair.fromSecretKey(new Uint8Array(JSON.parse(readFileSync(p, "utf8")) as number[]));
+  }
+  throw new Error("Set MAGPIE_PAYER_SECRET (bs58/JSON, for Railway) or MAGPIE_PAYER_KEYPAIR (file path).");
 }
 
 async function main() {
-  const payerPath = process.env.MAGPIE_PAYER_KEYPAIR ?? process.env.X402_PAYER_KEYPAIR;
-  if (!payerPath) throw new Error("Set MAGPIE_PAYER_KEYPAIR to the agent wallet's keypair JSON path.");
-  const keypair = loadKeypair(payerPath);
+  const keypair = loadKeypair();
   const agent = new MagpieAgent({ keypair, rpcUrl: cfg.rpcUrl, baseUrl: cfg.baseUrl });
+  const notifier = new Notifier(cfg);
 
   log("╔═══════════════════════════════════════════════════════════╗");
   log("║   Magpie autonomous agent — never-default by design        ║");
@@ -44,82 +63,101 @@ async function main() {
   log("");
 
   // ── GUARD FIRST: protect any open loans before we do anything else. ───────
-  const guardian = new LoanGuardian(agent, cfg);
+  const guardian = new LoanGuardian(agent, cfg, keypair, notifier);
   guardian.start();
+  await notifier.send(
+    "boot",
+    `Online · ${keypair.publicKey.toBase58().slice(0, 8)}… · category=${cfg.preferredCategory} · cycle ${(cfg.cycleIntervalMs / 60000) | 0}m · max ${cfg.maxOpenLoans} loan(s) · re-leverage ${cfg.allowRecursiveRedeploy ? "ON" : "off"} · ${brainEnabled() ? "Claude brain" : "deterministic picker"}.`,
+  );
 
-  // ── one decision cycle (a real deployment loops this) ────────────────────
-  await runCycle(agent, guardian);
+  // ── the continuous loop: research → maybe act → sleep → repeat ────────────
+  let cycleNum = 0;
+  const runOne = async () => {
+    cycleNum++;
+    try {
+      await notifier.send("cycle", `Cycle ${cycleNum} — researching…`);
+      await runCycle(agent, guardian, notifier);
+    } catch (err) {
+      await notifier.send("error", `Cycle ${cycleNum} errored (loop continues): ${(err as Error).message}`);
+    }
+  };
 
+  await runOne();
+
+  if (cfg.cycleIntervalMs > 0) {
+    setInterval(() => void runOne(), cfg.cycleIntervalMs);
+    log(`\nRunning continuously — research cycle every ${(cfg.cycleIntervalMs / 60000) | 0} min; guardian sweeps every ${(cfg.guardianIntervalMs / 60000) | 0} min. Ctrl-C to stop.`);
+    return; // active timers keep the process alive
+  }
+
+  // single-cycle mode (CYCLE_INTERVAL_MIN=0)
   if (cfg.dryRun) {
-    log("\n🟢 Dry run complete. The guardian also did one deadline sweep above. Set LIVE=1 (and MINT_ALLOWLIST) to act.");
+    log("\n🟢 Dry run (single cycle) complete. Set LIVE=1 to act, or CYCLE_INTERVAL_MIN>0 to run continuously.");
     guardian.stop();
     return;
   }
-  // LIVE: leave the guardian running forever so no loan can ever go overdue.
-  log("\n🔴 Cycle done. Guardian is running — it will repay every loan well before its deadline. Ctrl-C to stop.");
+  log("\n🔴 Single cycle done. Guardian stays running so no loan can go overdue. Ctrl-C to stop.");
 }
 
-async function runCycle(agent: MagpieAgent, guardian: LoanGuardian) {
-  // 1) BRAIN — Claude proposes a candidate (fed the Magpie SYSTEM_PROMPT inside
-  //    brain.ts); deterministic fallback when there's no ANTHROPIC_API_KEY.
-  //    Whatever it picks, the safety gates + guardian below still apply.
-  const candidate = await chooseCandidate(agent);
+async function runCycle(agent: MagpieAgent, guardian: LoanGuardian, notifier: Notifier) {
+  // 1) BRAIN — Claude proposes a candidate from the allowed menu (or HOLD); the
+  //    deterministic gates + guardian still have the final word.
+  const candidate = await chooseCandidate(agent, notifier);
   if (!candidate) {
-    log("BRAIN — no eligible candidate (empty allowlist in live, or none passed the risk gate). Doing nothing.");
+    await notifier.send("hold", "No eligible candidate this cycle — holding (the safe default).");
     return;
   }
   log(`BRAIN — candidate: ${candidate.symbol} (${candidate.mint}) [${candidate.category}]`);
 
   // 2) SOLVENCY — only ever spend what the guardian says is free (never the reserve).
   const deployable = await guardian.deployableLamports();
-  const buyLamports = (deployable * 9n) / 10n; // keep 10% headroom on top of the reserve
+  let buyLamports = (deployable * 9n) / 10n; // keep 10% headroom on top of the reserve
+  if (cfg.maxBuyLamports > 0n && buyLamports > cfg.maxBuyLamports) buyLamports = cfg.maxBuyLamports;
   log(`SOLVENCY — deployable ${fmt(deployable)} SOL; will buy with ${fmt(buyLamports)} SOL (reserve + gas held back).`);
   if (buyLamports <= 0n) {
-    log("SOLVENCY — nothing deployable while keeping repay reserves. Holding. (This is the never-default invariant doing its job.)");
+    await notifier.send("hold", "Nothing deployable while keeping repay reserves — holding (never-default invariant doing its job).");
     return;
   }
 
   // 3) BUY on Jupiter (Magpie can't — it's a lender, not a DEX).
   const buy = await jupiterBuy({
-    payer: agentKeypair(agent),
+    payer: agentKeypair(),
     outputMint: candidate.mint,
     amountLamports: buyLamports,
     rpcUrl: cfg.rpcUrl,
     dryRun: cfg.dryRun,
   });
   if (!buy.ok) {
-    log(`BUY — skipped/failed: ${buy.reason}`);
+    await notifier.send("warn", `Buy of ${candidate.symbol} skipped/failed: ${buy.reason}`);
     return;
   }
-  log(`BUY — ${cfg.dryRun ? "quote" : "bought"} ${buy.outAmount ?? "?"} ${candidate.symbol}${buy.signature ? ` (tx ${buy.signature})` : ""}.`);
+  await notifier.send(
+    "buy",
+    `${cfg.dryRun ? "Quoted" : "Bought"} ${buy.outAmount ?? "?"} ${candidate.symbol} for ${fmt(buyLamports)} SOL${buy.signature ? ` (tx ${buy.signature})` : ""}.`,
+  );
 
-  // 4) COLLATERALIZE on Magpie — but ONLY through safeBorrow, which refuses if
-  //    it can't honor the resulting deadline, and registers the loan + reserve.
+  // 4) COLLATERALIZE on Magpie — only through safeBorrow, which refuses if it
+  //    can't honor the resulting deadline, registers the loan + reserve, and
+  //    DMs the borrow. The guardian then repays it (via repay.ts) well early.
   const collateralAmount = buy.outAmount ?? "0";
-  const loan = await guardian.safeBorrow({ collateralMint: candidate.mint, collateralAmount });
+  await guardian.safeBorrow({ collateralMint: candidate.mint, collateralAmount });
 
-  // 5) ARM EXITS (best-effort convenience, NOT a safety net) — live + V4 only.
-  if (loan && cfg.useV4Exits && !cfg.dryRun) {
-    try {
-      await agent.armExit({ loanId: loan.loanId, direction: "above", target: "2x", slippageBps: 100 });
-      await agent.armExit({ loanId: loan.loanId, direction: "below", target: "0.7x", slippageBps: 150 });
-      log("ARM — in-vault TP @2x / SL @0.7x armed (best-effort; the guardian, not the SL, is what prevents default).");
-    } catch (err) {
-      log(`ARM — skipped: ${(err as Error).message}`);
-    }
-  }
+  // NOTE: in-vault exit arming (TP/SL) is NOT in the published SDK (0.1.x), so
+  // this agent does not arm exits — by design, the GUARDIAN (never a stop-loss)
+  // is what prevents default. Exit arming is a future SDK addition.
 
-  // 6) DEPLOY — by policy the borrowed SOL is HELD as repay reserve, not re-risked.
+  // 5) DEPLOY — by policy the borrowed SOL is HELD as repay reserve, not re-risked.
   if (cfg.allowRecursiveRedeploy) {
     log("DEPLOY — ⚠️ recursive redeploy is ENABLED (higher risk). The guardian still gates spend by the reserve.");
   } else {
-    log("DEPLOY — borrowed SOL held idle as repay reserve (no re-leverage). The guardian will repay before the deadline.");
+    log("DEPLOY — borrowed SOL held idle as repay reserve (no re-leverage). The guardian repays before the deadline.");
   }
 }
 
-/** Safe candidate selection: allowlist-first, eligibility + risk gated. */
+/** Safe candidate selection: allowlist/open-universe, eligibility + risk gated. */
 async function chooseCandidate(
   agent: MagpieAgent,
+  notifier: Notifier,
 ): Promise<{ mint: string; symbol: string; category: string } | null> {
   const { tokens } = await agent.collateralCatalog();
   const byMint = new Map(tokens.map((t) => [t.mint, t]));
@@ -130,17 +168,17 @@ async function chooseCandidate(
     cfg.preferredCategory === "any" ||
     (cfg.preferredCategory === "memecoin" ? cat === "memecoin" : cat !== "memecoin");
 
-  // Live: ONLY mints you explicitly allowlisted. Dry-run with no allowlist:
-  // auto-pick one of the preferred category just to illustrate the flow.
   let pool: Array<{ mint: string; symbol: string; decimals: number; category: string }>;
   if (cfg.mintAllowlist.length) {
     pool = cfg.mintAllowlist.map((m) => byMint.get(m)).filter(Boolean) as typeof tokens;
     const pref = pool.filter((t) => matches(t.category));
     if (pref.length) pool = pref; // prefer the category among allowlisted, else use all allowlisted
-  } else if (cfg.dryRun) {
+  } else if (cfg.dryRun || cfg.openUniverse) {
+    // dry-run, or LIVE open-universe: pick from Magpie's vetted approved catalog,
+    // filtered by preferred category, risk-gated below.
     pool = tokens.filter((t) => matches(t.category));
   } else {
-    pool = []; // live + no allowlist → buy nothing
+    pool = []; // live + no allowlist + not open-universe → buy nothing
   }
   if (!pool.length) return null;
 
@@ -152,6 +190,7 @@ async function chooseCandidate(
     try {
       const decision = await chooseCandidateWithClaude(agent, cfg, pool);
       log(`BRAIN(Claude) — ${decision.action.toUpperCase()}${decision.symbol ? " " + decision.symbol : ""} · conf ${decision.confidence.toFixed(2)} · ${decision.reasoning}`);
+      await notifier.send("brain", `Claude: ${decision.action.toUpperCase()}${decision.symbol ? " " + decision.symbol : ""} (conf ${decision.confidence.toFixed(2)}) — ${decision.reasoning}`);
       if (decision.action !== "buy" || !decision.mint) return null; // HOLD is a valid, safe outcome
       const chosen = pool.find((t) => t.mint === decision.mint);
       if (!chosen) {
@@ -171,6 +210,7 @@ async function chooseCandidate(
       const score = Number((risk as { risk_score?: number }).risk_score ?? 100);
       if (score > cfg.maxTokenRisk) {
         log(`BRAIN — ${pick.symbol} risk ${score} > max ${cfg.maxTokenRisk}; rejecting.`);
+        await notifier.send("hold", `Rejected ${pick.symbol}: Magpie risk ${score} > max ${cfg.maxTokenRisk}.`);
         return null;
       }
     } catch (err) {
@@ -183,8 +223,8 @@ async function chooseCandidate(
 
 // The SDK keeps the keypair private; for the Jupiter leg we need to sign
 // directly, so re-load it the same way the agent did.
-function agentKeypair(_agent: MagpieAgent) {
-  return loadKeypair((process.env.MAGPIE_PAYER_KEYPAIR ?? process.env.X402_PAYER_KEYPAIR)!);
+function agentKeypair(): Keypair {
+  return loadKeypair();
 }
 
 const fmt = (lamports: bigint) => (Number(lamports) / 1e9).toFixed(4);
