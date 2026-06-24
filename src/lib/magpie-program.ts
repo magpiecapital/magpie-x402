@@ -422,28 +422,38 @@ export interface LendingPoolState {
 }
 
 /**
- * Manual decode of the LendingPool Anchor account. Layout (matches the IDL):
+ * Manual decode of the LendingPool Anchor account. Layout VERIFIED 2026-06-24
+ * against magpie_lending / magpie-v3 / magpie-v4 IDLs (all three share it):
  *   0..8     account discriminator (skipped)
- *   8..40    lender_authority    (Pubkey, 32 bytes)
- *   40..48   total_deposits      (u64, le)
- *   48..56   total_shares        (u64, le)
- *   56..64   total_borrowed      (u64, le)
- *   64..72   total_loans_issued  (u64, le)
- *   72..80   total_liquidations  (u64, le)
- *   80..88   total_fees_earned   (u64, le)
+ *   8..40    authority           (Pubkey, 32)  ← lenderAuthority
+ *   40..72   loan_token_vault    (Pubkey, 32)  (skipped)
+ *   72..104  loan_token_mint     (Pubkey, 32)  (skipped)
+ *   104..106 protocol_fee_bps    (u16)         (skipped)
+ *   106..108 keeper_reward_bps   (u16)         (skipped)
+ *   108..116 total_deposits      (u64, le)
+ *   116..124 total_shares        (u64, le)
+ *   124..132 total_borrowed      (u64, le)
+ *   132..140 total_fees_earned   (u64, le)
+ *   140..148 total_loans_issued  (u64, le)
+ *   148..156 total_liquidations  (u64, le)
+ *
+ * NOTE: the previous offsets (40/48/56/64/72/80) were WRONG — they skipped only
+ * the authority pubkey, then read the loan_token_vault / loan_token_mint pubkey
+ * bytes as u64s, producing ~1e19 garbage totals (e.g. "13.8 billion SOL
+ * deposited"). They also had fees_earned / loans_issued out of order. Fixed.
  */
 function decodeLendingPool(data: Buffer): Omit<LendingPoolState, "programId" | "programVersion" | "poolPda" | "fetchedAtMs"> {
-  if (data.length < 88) throw new Error("pool account too small");
+  if (data.length < 156) throw new Error("pool account too small");
   const u = (offset: number) => data.readBigUInt64LE(offset).toString();
   const lender = new PublicKey(data.subarray(8, 40)).toBase58();
   return {
     lenderAuthority: lender,
-    totalDepositsLamports: u(40),
-    totalSharesLamports: u(48),
-    totalBorrowedLamports: u(56),
-    totalLoansIssued: u(64),
-    totalLiquidations: u(72),
-    totalFeesEarnedLamports: u(80),
+    totalDepositsLamports: u(108),
+    totalSharesLamports: u(116),
+    totalBorrowedLamports: u(124),
+    totalFeesEarnedLamports: u(132),
+    totalLoansIssued: u(140),
+    totalLiquidations: u(148),
   };
 }
 
