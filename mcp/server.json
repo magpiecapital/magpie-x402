@@ -1,5 +1,5 @@
 {
-  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-07-09/server.json",
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.magpiecapital/magpie-mcp",
   "description": "Agent-native lending on Solana via x402: borrow against tokens, arm in-vault TP/SL, repay.",
   "version": "0.1.1",

@@ -1,6 +1,7 @@
 {
   "name": "@magpieloans/magpie-mcp",
   "version": "0.1.1",
+  "mcpName": "io.github.magpiecapital/magpie-mcp",
   "description": "MCP server exposing Magpie Capital's x402 API as native tools for Claude Desktop, Cursor, Windsurf, ChatGPT desktop, and any MCP-aware agent host.",
   "type": "module",
   "bin": {
