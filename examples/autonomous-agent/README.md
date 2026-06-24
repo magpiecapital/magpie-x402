@@ -48,8 +48,17 @@ The guardian **starts first** and runs for the whole process, so it protects pre
 - `MAX_OPEN_LOANS=1`, `REPAY_LEAD_FRACTION=0.5`, `TIER=standard` (7-day term = most headroom).
 - `MINT_ALLOWLIST` is **required in live** — the agent will buy nothing it isn't explicitly allowed to, and gates every candidate through paid `token_risk`.
 
-## Plug in a real brain
-Replace `chooseCandidate()` in `agent.ts` with an LLM loop (Claude Agent SDK / Solana Agent Kit / LangGraph). Feed it `SYSTEM_PROMPT` from `magpie-playbook.ts` so it understands time-based liquidation, full-gross repay, and the never-default policy before it gets tool access.
+## The Claude brain (built in — `brain.ts`)
+`brain.ts` is a Claude-driven selector: it's fed the `SYSTEM_PROMPT` (so it understands time-based liquidation, full-gross repay, never-default), researches with read tools (`assess_token_risk`, `get_pool_state`), and proposes a pick **from the allowed menu** — or says HOLD. The model *proposes*; the deterministic layer (allowlist → risk gate → solvency reserve → guardian) *disposes* and always has the final word. The model can never invent a mint or bypass a safety check.
+
+Turn it on:
+```bash
+npm install @anthropic-ai/sdk
+export ANTHROPIC_API_KEY=sk-ant-...
+# auto-enables when the key is present; force with USE_LLM_BRAIN=true / off with =false
+# default model claude-sonnet-4-6 — override: MAGPIE_BRAIN_MODEL=claude-opus-4-8
+```
+No key? The agent falls back to the deterministic picker automatically (verified).
 
 ## ⚠️ Before going live
 - `jupiter.ts` is the one integration **outside** Magpie's verified SDK — confirm the Ultra request/response shape against current Jupiter docs and **test with a tiny amount first** (real swaps are mainnet-only; there's no devnet path).

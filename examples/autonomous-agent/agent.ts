@@ -17,7 +17,8 @@ import { MagpieAgent } from "@magpieloans/magpie-agent";
 import { loadConfig } from "./config.js";
 import { LoanGuardian } from "./loan-guardian.js";
 import { jupiterBuy } from "./jupiter.js";
-import { RULES, SYSTEM_PROMPT } from "./magpie-playbook.js";
+import { brainEnabled, chooseCandidateWithClaude } from "./brain.js";
+import { RULES } from "./magpie-playbook.js";
 
 const log = (s = "") => console.log(s);
 const cfg = loadConfig();
@@ -59,9 +60,9 @@ async function main() {
 }
 
 async function runCycle(agent: MagpieAgent, guardian: LoanGuardian) {
-  // 1) BRAIN — choose a candidate. Replace this with an LLM (Claude SDK / agent
-  //    kit) fed SYSTEM_PROMPT; for the scaffold it's a safe, deterministic pick.
-  void SYSTEM_PROMPT; // ← give this to your LLM brain so it understands Magpie
+  // 1) BRAIN — Claude proposes a candidate (fed the Magpie SYSTEM_PROMPT inside
+  //    brain.ts); deterministic fallback when there's no ANTHROPIC_API_KEY.
+  //    Whatever it picks, the safety gates + guardian below still apply.
   const candidate = await chooseCandidate(agent);
   if (!candidate) {
     log("BRAIN — no eligible candidate (empty allowlist in live, or none passed the risk gate). Doing nothing.");
@@ -141,10 +142,29 @@ async function chooseCandidate(
   } else {
     pool = []; // live + no allowlist → buy nothing
   }
-  const pick = pool[0];
-  if (!pick) return null;
+  if (!pool.length) return null;
 
-  // Risk gate (paid 0.001 SOL) — only spend on it when live.
+  // BRAIN — Claude proposes from the allowed menu (and may say HOLD); on any
+  // failure or no key, fall back to the deterministic first pick. The model can
+  // ONLY choose a mint that's already in the safe menu.
+  let pick = pool[0];
+  if (brainEnabled()) {
+    try {
+      const decision = await chooseCandidateWithClaude(agent, cfg, pool);
+      log(`BRAIN(Claude) — ${decision.action.toUpperCase()}${decision.symbol ? " " + decision.symbol : ""} · conf ${decision.confidence.toFixed(2)} · ${decision.reasoning}`);
+      if (decision.action !== "buy" || !decision.mint) return null; // HOLD is a valid, safe outcome
+      const chosen = pool.find((t) => t.mint === decision.mint);
+      if (!chosen) {
+        log("BRAIN — Claude picked a mint outside the allowed menu; rejecting for safety.");
+        return null;
+      }
+      pick = chosen;
+    } catch (err) {
+      log(`BRAIN — Claude unavailable (${(err as Error).message}); using deterministic pick.`);
+    }
+  }
+
+  // Risk gate (paid 0.001 SOL) — defense in depth, only spends when live.
   if (!cfg.dryRun) {
     try {
       const risk = await agent.tokenRisk(pick.mint);
