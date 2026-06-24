@@ -179,6 +179,26 @@ export async function buildBorrowHandler(c: Context) {
     const hint = classifyBorrowError(code);
     if (hint) parsed = { ...parsed, classified: hint };
   }
+  // Field-shape adapter: the bot returns summary in snake_case + SOL
+  // (loan_id, principal_sol, fee_sol), but the SDK reads camelCase + lamports
+  // (loanId, borrowableLamports, feeLamports). Without these the SDK throws
+  // `Cannot convert undefined to a BigInt` AFTER the loan already opened on-chain
+  // — a success-then-throw that can leave a loan unrepaid. ADD the camelCase
+  // aliases (snake_case kept for any direct/curl consumer).
+  if (res.ok && parsed.summary && typeof parsed.summary === "object") {
+    const s = parsed.summary as Record<string, unknown>;
+    const toLamports = (sol: unknown) =>
+      sol == null ? undefined : String(Math.round(Number(sol) * 1e9));
+    parsed = {
+      ...parsed,
+      summary: {
+        ...s,
+        loanId: s.loanId ?? s.loan_id,
+        borrowableLamports: s.borrowableLamports ?? toLamports(s.principal_sol),
+        feeLamports: s.feeLamports ?? toLamports(s.fee_sol),
+      },
+    };
+  }
   return c.json(parsed, res.status as never);
 }
 
