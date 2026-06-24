@@ -151,15 +151,22 @@ export async function buildBorrowHandler(c: Context) {
     console.warn(`[build-borrow] non-JSON from bot (status ${res.status}):`, text.slice(0, 300));
     parsed = { error: "bot_returned_non_json", status: res.status };
   }
-  // A 401/403 from the bot's INTERNAL auth means our X-Internal-Token doesn't
-  // match the bot's INTERNAL_API_TOKEN — a PROTOCOL MISCONFIG, never the agent's
-  // fault. Pass-through would surface as a 4xx, and the two-phase claim only
-  // refunds on 5xx → the agent would be charged-but-denied. Remap to 503 so the
-  // claim RELEASES and the payment is NOT consumed. (Root-cause: align
-  // INTERNAL_API_TOKEN across the x402 service and the bot.)
-  if (res.status === 401 || res.status === 403) {
+  // Refund ONLY on a genuine internal-auth failure — the bot's INTERNAL auth
+  // returns exactly `401 {error:"unauthorized"}` when our X-Internal-Token
+  // doesn't match its INTERNAL_API_TOKEN (a PROTOCOL MISCONFIG, never the
+  // agent's fault). That case must remap to 503 so the two-phase claim RELEASES
+  // and the payment is NOT consumed (the middleware refunds only on >=500).
+  //
+  // SECURITY: do NOT key on status code alone. The bot also returns 403 for many
+  // legitimate, correctly-charged BUSINESS denials AFTER internal-auth passed
+  // (banned wallet, anti-exploit refusal, disabled token, …). Refunding those
+  // would let one payment re-drive the bot's full gauntlet unthrottled and
+  // reverse holder accrual each time (free-work amplification + enumeration).
+  // So 403 — and any 401 that is NOT the internal-auth sentinel — passes through
+  // UNCHANGED: a correct denial is correctly charged.
+  if (res.status === 401 && parsed.error === "unauthorized") {
     console.error(
-      `[build-borrow] bot internal-auth ${res.status} — INTERNAL_API_TOKEN mismatch (x402↔bot). Releasing claim; agent not charged.`,
+      `[build-borrow] bot internal-auth 401 unauthorized — INTERNAL_API_TOKEN mismatch (x402↔bot). Releasing claim; agent not charged.`,
     );
     return c.json(
       {

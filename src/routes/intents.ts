@@ -99,10 +99,12 @@ async function forward(c: Context, url: string, init: RequestInit) {
   let parsed: unknown;
   try { parsed = JSON.parse(text); }
   catch { parsed = { error: "bot_returned_non_json", status: res.status }; }
-  // Bot internal-auth 401/403 = protocol misconfig (token mismatch), never the
-  // agent's fault → remap to 503 so the x402 claim refunds (no charged-but-denied).
-  if (res.status === 401 || res.status === 403) {
-    console.error(`[intents] bot internal-auth ${res.status} — INTERNAL_API_TOKEN mismatch (x402↔bot). Releasing claim; agent not charged.`);
+  // Refund ONLY on the internal-auth sentinel (401 {error:"unauthorized"} = token
+  // mismatch x402↔bot). SECURITY: a bare 403 is a legitimate, correctly-charged
+  // business denial (token disabled, missing_owner, …); refunding it would let one
+  // payment re-drive the bot unthrottled. 403 / non-sentinel 401 passes through.
+  if (res.status === 401 && (parsed as Record<string, unknown>)?.error === "unauthorized") {
+    console.error(`[intents] bot internal-auth 401 unauthorized — INTERNAL_API_TOKEN mismatch (x402↔bot). Releasing claim; agent not charged.`);
     return c.json(
       { error: "agent_api_unavailable", detail: "Magpie's agent API is temporarily unavailable (server configuration). Your payment was NOT consumed — please retry shortly." },
       503,
