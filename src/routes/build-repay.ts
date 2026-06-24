@@ -62,15 +62,21 @@ type PresimResult =
 async function presimulateRepay(txB64: string): Promise<PresimResult> {
   let vtx: VersionedTransaction;
   try {
-    // The repay builder emits a legacy Transaction (same shape every other
-    // Magpie builder returns; the SDK deserializes it with Transaction.from).
-    // Recompile its message into a VersionedTransaction so we can simulate via
-    // the non-deprecated overload with sigVerify=false (the tx is unsigned).
-    const legacy = Transaction.from(Buffer.from(txB64, "base64"));
-    vtx = new VersionedTransaction(legacy.compileMessage());
+    const raw = Buffer.from(txB64, "base64");
+    try {
+      // Version-agnostic path (audit low #7): deserialize directly so a future
+      // v0/ALT repay tx keeps its address-lookup tables. VersionedTransaction
+      // .deserialize reads BOTH legacy and v0 wire formats.
+      vtx = VersionedTransaction.deserialize(raw);
+    } catch {
+      // Fall back to recompiling a classic Transaction wire format that the
+      // versioned deserializer can't read (older builder output).
+      const legacy = Transaction.from(raw);
+      vtx = new VersionedTransaction(legacy.compileMessage());
+    }
   } catch {
-    // Not a legacy tx we can recompile (or undecodable). Don't guess —
-    // skip the pre-sim rather than reject a valid tx we simply can't model.
+    // Undecodable either way. Don't guess — skip the pre-sim rather than reject
+    // a valid tx we simply can't model (the validator simulates on submit).
     return { ok: true, presim: "skipped", detail: "tx_not_simulatable" };
   }
 
