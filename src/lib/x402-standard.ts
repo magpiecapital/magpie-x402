@@ -38,7 +38,7 @@
 import type { Context } from "hono";
 import { Connection, PublicKey } from "@solana/web3.js";
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
-import { verifyNonce, NONCE_TTL_MS } from "./hmac-nonce.js";
+import { verifyNonce, NONCE_TTL_MS, mintPriceCommit, verifyPriceCommit } from "./hmac-nonce.js";
 
 // ── Constants (env-tunable) ─────────────────────────────────────────────────
 export const SOLANA_CAIP2 = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"; // mainnet
@@ -83,7 +83,10 @@ export interface PaymentRequirements {
   asset: string;  // SPL mint
   payTo: string;  // OWNER wallet (facilitator derives the ATA)
   maxTimeoutSeconds: number;
-  extra: { feePayer: string; memo: string };
+  // priceCommit (optional, audit #2): HMAC binding this exact amount to
+  // (endpoint, asset, nonce) so settle enforces the quoted price, not a
+  // recomputed-at-settle one. Absent on legacy challenges → settle falls back.
+  extra: { feePayer: string; memo: string; priceCommit?: string };
 }
 interface VerifyResponse { isValid?: boolean; invalidReason?: string; payer?: string }
 interface SettleResponse { success?: boolean; errorReason?: string; signature?: string; transaction?: string; payer?: string }
@@ -189,14 +192,22 @@ export function wsolAtomicForLamports(amountLamports: bigint): string {
 }
 
 // ── Build the SERVER-OWNED accepts for a route ──────────────────────────────
-export async function buildSplAccepts(amountLamports: bigint, memo: string, feePayer: string): Promise<PaymentRequirements[]> {
+export async function buildSplAccepts(endpoint: string, amountLamports: bigint, memo: string, feePayer: string): Promise<PaymentRequirements[]> {
   const maxTimeoutSeconds = Math.min(60, Math.floor(NONCE_TTL_MS / 1000)); // <= blockhash/window; nonce TTL covers it
   const solUsdRate = await getSolUsdRate();
-  const base = { scheme: "exact" as const, network: SOLANA_CAIP2, payTo: getPayTo(), maxTimeoutSeconds, extra: { feePayer, memo } };
+  const nonce = memo.replace(/^magpie-x402:/, "");
+  // Each accept carries a priceCommit binding ITS amount to (endpoint, asset,
+  // nonce). Settle verifies this instead of recomputing the price, killing
+  // challenge→settle SOL/USD drift. (audit #2.)
+  const mk = (amount: string, asset: string): PaymentRequirements => ({
+    scheme: "exact", network: SOLANA_CAIP2, payTo: getPayTo(), maxTimeoutSeconds,
+    extra: { feePayer, memo, priceCommit: mintPriceCommit(endpoint, asset, amount, nonce) },
+    amount, asset,
+  });
   const accepts: PaymentRequirements[] = [
-    { ...base, amount: usdcAtomicForLamports(amountLamports, solUsdRate), asset: USDC_MINT },
+    mk(usdcAtomicForLamports(amountLamports, solUsdRate), USDC_MINT),
   ];
-  if (WSOL_ENABLED) accepts.push({ ...base, amount: wsolAtomicForLamports(amountLamports), asset: WSOL_MINT });
+  if (WSOL_ENABLED) accepts.push(mk(wsolAtomicForLamports(amountLamports), WSOL_MINT));
   return accepts;
 }
 
@@ -340,6 +351,16 @@ async function botRecord(rec: Record<string, unknown>): Promise<{ fresh?: boolea
   } catch { return null; }
 }
 
+// Same-instance LRU of SPL signatures served while the bot's durable single-use
+// claim was unreachable (audit #3). Bounds same-instance double-serve; the
+// settled on-chain tx (verified in 6b) + the bot's UNIQUE(tx_signature) on a
+// later durable claim are the cross-instance anchors. Pruned on the nonce TTL.
+const servedSplSigs = new Map<string, number>();
+setInterval(() => {
+  const now = Date.now();
+  for (const [s, exp] of servedSplSigs) if (exp < now) servedSplSigs.delete(s);
+}, 60_000).unref?.();
+
 /**
  * Handle a standard-rail (PAYMENT-SIGNATURE) request. Returns a Hono Response
  * (the served downstream result is handled by the caller on `ok`). On ANY
@@ -369,7 +390,7 @@ export async function settleStandardSplPayment(
   // durable signature claim (7) are the authoritative settlement + single-use guards.
   const accepted = payload.accepted as {
     scheme?: string; network?: string; asset?: string; amount?: string;
-    payTo?: string; extra?: { feePayer?: string; memo?: string };
+    payTo?: string; extra?: { feePayer?: string; memo?: string; priceCommit?: string };
   } | undefined;
   if (!accepted || typeof accepted !== "object") return fail(402, { error: "missing_accepted" });
   // 3a. asset must be one we actually offer
@@ -392,17 +413,32 @@ export async function settleStandardSplPayment(
   const nonce = mm[1];
   const nb = verifyNonce(nonce, opts.endpoint);
   if (!nb.ok) return fail(402, { error: "nonce_invalid", reason: nb.reason });
-  // 3d. NO UNDERPAY: claimed amount >= our price for the chosen asset (10%
-  //     SOL/USD drift headroom on USDC within the nonce window; wSOL is exact).
-  //     Re-checked authoritatively on-chain in 6b against this same reqd.amount.
+  // 3d. NO UNDERPAY. Prefer the price-commit (audit #2): if the claimed amount is
+  //     bound to (endpoint, asset, nonce) by OUR HMAC, it IS the exact amount we
+  //     quoted — enforce THAT on-chain (6b), with no fresh-rate recompute, so a
+  //     SOL/USD move in the nonce window can't false-reject a correct payer or let
+  //     one underpay on a downtick. Commit present but invalid → tampered → reject.
+  //     Absent (legacy challenge minted before this deploy) → fall back to the
+  //     recompute floor (ages out within the 10-min nonce TTL). wSOL is exact.
   let claimed: bigint;
   try { claimed = BigInt(accepted.amount ?? ""); } catch { return fail(402, { error: "invalid_amount" }); }
-  const serverMin = isWsol
-    ? BigInt(wsolAtomicForLamports(opts.amountLamports))
-    : BigInt(usdcAtomicForLamports(opts.amountLamports, await getSolUsdRate()));
-  const floor = isWsol ? serverMin : (serverMin * 90n) / 100n;
-  if (claimed <= 0n || claimed < floor) {
-    return fail(402, { error: "amount_below_required", required: serverMin.toString() });
+  if (claimed <= 0n) return fail(402, { error: "invalid_amount" });
+  if (isWsol) {
+    const exact = BigInt(wsolAtomicForLamports(opts.amountLamports));
+    if (claimed < exact) return fail(402, { error: "amount_below_required", required: exact.toString() });
+  } else {
+    const hasCommit = !!accepted.extra?.priceCommit;
+    const committed = verifyPriceCommit(accepted.extra?.priceCommit, opts.endpoint, accepted.asset!, accepted.amount!, nonce);
+    if (hasCommit && !committed) {
+      return fail(402, { error: "price_commit_invalid" });
+    }
+    if (!committed) {
+      // Legacy challenge with no commit — recompute floor with headroom.
+      const serverMin = BigInt(usdcAtomicForLamports(opts.amountLamports, await getSolUsdRate()));
+      const floor = (serverMin * 90n) / 100n;
+      if (claimed < floor) return fail(402, { error: "amount_below_required", required: serverMin.toString() });
+    }
+    // committed === true → claimed is the authentic quoted amount; 6b enforces it.
   }
 
   // 3e. the VALIDATED requirements we settle against (client's memo + amount, OUR
@@ -464,19 +500,37 @@ export async function settleStandardSplPayment(
   // reject as a replay. null (bot/DB unreachable) → fail CLOSED: we cannot prove
   // single-use, so we must not serve (the on-chain payment is recorded by its
   // signature and is reconcilable on retry once the bot is reachable).
-  const claim = await botRecord({
+  const recordArgs = {
     // kind "settled-spl": records the metric + claims the signature (durable
     // single-use) but does NOT accrue — the amount is a USDC/wSOL atomic, not
     // lamports; the SPL->SOL sweep credits the holder pool after conversion.
     endpoint_path: opts.endpoint, method: c.req.method, amount_lamports: reqd.amount,
     payer_pubkey: payer, tx_signature: sig, nonce, kind: "settled-spl",
     asset: reqd.asset,
-  });
-  if (!claim || claim.fresh !== true) {
-    return fail(402, {
-      error: claim && claim.fresh === false ? "payment_already_used" : "settlement_claim_unconfirmed",
-    });
+  };
+  const claim = await botRecord(recordArgs);
+  if (claim && claim.fresh === false) {
+    // The bot KNOWS this signature was already served — a genuine replay.
+    return fail(402, { error: "payment_already_used" });
   }
+  if (!claim) {
+    // Bot/DB unreachable — but the on-chain settlement is CONFIRMED (6b), so the
+    // agent DID move real USDC/wSOL into our payTo. Failing closed here would be
+    // charged-but-denied (we keep the funds, serve nothing). The settled on-chain
+    // signature is itself the single-use anchor — a settled tx can't be
+    // re-settled — and a same-instance LRU dedups local replays. So SERVE, record
+    // it locally, and best-effort retry the durable claim so billing +
+    // cross-instance dedup land once the bot recovers. (audit #3.)
+    if (servedSplSigs.has(sig)) {
+      return fail(402, { error: "payment_already_used" });
+    }
+    servedSplSigs.set(sig, Date.now() + NONCE_TTL_MS);
+    void botRecord(recordArgs).catch(() => {}); // fire-and-forget durable-claim retry
+    console.warn(
+      `[x402-standard] bot-record unreachable; serving on confirmed on-chain settlement sig=${sig.slice(0, 16)}… (LRU-deduped, durable claim queued)`,
+    );
+  }
+  // claim.fresh === true (first durable claim) or served-on-confirmed above → serve.
 
   // 8. emit the standard settlement response header + propagate payer for per-wallet gating
   try { c.header("PAYMENT-RESPONSE", Buffer.from(JSON.stringify({ success: true, signature: sig, payer })).toString("base64")); } catch { /* non-fatal */ }

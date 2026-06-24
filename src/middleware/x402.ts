@@ -121,7 +121,7 @@ export function x402Required(config: X402Config): MiddlewareHandler {
               description: config.label ?? "Magpie x402 paid endpoint",
               mimeType: "application/json",
             },
-            accepts: await buildSplAccepts(config.amountLamports, memo, fp.feePayer),
+            accepts: await buildSplAccepts(endpoint, config.amountLamports, memo, fp.feePayer),
             extensions: {},
           };
           standardBody = v2;
