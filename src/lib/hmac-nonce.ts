@@ -41,10 +41,19 @@ function secret(): Buffer {
     // fallback warning is invisible in serverless logs. Fail loudly
     // instead so the operator catches this before customers hit weird
     // bad_mac rejections.
-    if (process.env.NODE_ENV === "production") {
+    // Refuse on ANY serverless deploy, not just NODE_ENV=production: on Vercel
+    // (incl. preview/custom envs where NODE_ENV may not be "production") an
+    // ephemeral per-instance secret means a challenge minted on instance A
+    // fails bad_mac on instance B → intermittent unredeemable payments.
+    // (audit MEDIUM #5.)
+    if (
+      process.env.NODE_ENV === "production" ||
+      process.env.VERCEL ||
+      process.env.VERCEL_ENV
+    ) {
       throw new Error(
-        "[x402] X402_NONCE_SECRET must be set to a stable 16+ char value in production. " +
-        "Refusing to mint ephemeral nonces.",
+        "[x402] X402_NONCE_SECRET must be set to a stable 16+ char value on any " +
+        "serverless/production deploy. Refusing to mint ephemeral nonces.",
       );
     }
     // Dev fallback — random per-process so signed nonces are still

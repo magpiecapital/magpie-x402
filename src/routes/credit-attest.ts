@@ -47,7 +47,16 @@ export async function creditAttestHandler(c: Context) {
   } catch (err) {
     return c.json({ error: "bot_unreachable", detail: (err as Error).message?.slice(0, 200) }, 502);
   }
-  const body = await res.json();
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch {
+    // Bot returned non-JSON (proxy error page / truncated body). Surface a 502
+    // — NOT a 200 with junk — so the gateway's two-phase release frees the
+    // payment for retry instead of consuming it on an undelivered call.
+    // (audit MEDIUM #6.)
+    return c.json({ error: "bot_returned_non_json", upstream_status: res.status }, 502);
+  }
   return c.json(body as Record<string, unknown>, res.status as never, {
     "Cache-Control": "public, s-maxage=60",
   });

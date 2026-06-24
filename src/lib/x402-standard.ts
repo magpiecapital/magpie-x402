@@ -90,12 +90,20 @@ interface SettleResponse { success?: boolean; errorReason?: string; signature?: 
 
 // ── feePayer provenance (cached at boot) ────────────────────────────────────
 let _feePayerCache: { url: string; feePayer: string } | null = null;
+let _feePayerNegUntilMs = 0;
 export async function getSvmFeePayer(): Promise<{ url: string; feePayer: string } | null> {
   if (_feePayerCache) return _feePayerCache;
+  // Negative cache: if both facilitators were just unreachable, don't re-probe
+  // (2 × timeout) on every 402 challenge for the next window — that would add
+  // ~6s to every challenge during an outage and approach the function's
+  // maxDuration. (audit MEDIUM #7.)
+  if (Date.now() < _feePayerNegUntilMs) return null;
   for (const url of [FACILITATOR_PRIMARY, FACILITATOR_FALLBACK]) {
     if (!FACILITATOR_ALLOWLIST.has(hostOf(url))) continue;
     try {
-      const r = await fetch(`${url}/supported`, { signal: AbortSignal.timeout(8000) });
+      // 3s on the challenge path (was 8s) — a 402 must never hang on the
+      // facilitator's /supported. verify/settle keep their longer timeouts.
+      const r = await fetch(`${url}/supported`, { signal: AbortSignal.timeout(3000) });
       if (!r.ok) continue;
       const j = (await r.json()) as { kinds?: Array<{ x402Version?: number; scheme?: string; network?: string; extra?: { feePayer?: string } }> };
       const kind = (j.kinds || []).find(
@@ -108,6 +116,7 @@ export async function getSvmFeePayer(): Promise<{ url: string; feePayer: string 
       }
     } catch { /* try next */ }
   }
+  _feePayerNegUntilMs = Date.now() + 45_000; // both unreachable — back off so challenges don't re-probe for 45s
   return null;
 }
 
@@ -117,24 +126,57 @@ export async function getSvmFeePayer(): Promise<{ url: string; feePayer: string 
 // ~$71 at go-live, which would actively repel USDC-paying agents. Jupiter-
 // primary, cached 60s, env/150 fallback so a Jupiter blip never blocks a 402.
 let _solUsdCache: { rate: number; atMs: number } | null = null;
+let _solUsdLastGood: number | null = null;
+
+function sane(p: unknown): number | null {
+  return typeof p === "number" && Number.isFinite(p) && p > 0 && p < 100_000 ? p : null;
+}
+async function jupiterSolUsd(): Promise<number | null> {
+  try {
+    const r = await fetch(`https://lite-api.jup.ag/price/v3?ids=${WSOL_MINT}`, { signal: AbortSignal.timeout(4000) });
+    if (!r.ok) return null;
+    const j = (await r.json()) as Record<string, { usdPrice?: number } | undefined>;
+    return sane(j[WSOL_MINT]?.usdPrice);
+  } catch { return null; }
+}
+async function dexscreenerSolUsd(): Promise<number | null> {
+  try {
+    const r = await fetch(`https://api.dexscreener.com/tokens/v1/solana/${WSOL_MINT}`, { signal: AbortSignal.timeout(4000) });
+    if (!r.ok) return null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const j: any = await r.json();
+    const pairs = Array.isArray(j) ? j : (j?.pairs || []);
+    if (!pairs.length) return null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const best = pairs.reduce((b: any, p: any) => ((p.liquidity?.usd || 0) > (b?.liquidity?.usd || 0) ? p : b), pairs[0]);
+    return sane(parseFloat(best?.priceUsd));
+  } catch { return null; }
+}
+
+// Cross-sourced SOL/USD so a single mis-priced source can't make USDC
+// under-collect (the audit's single-source underpay finding + the protocol's
+// robust-price rule). Jupiter-primary + DexScreener; agree-within-3x → trust
+// Jupiter, diverge → use last-good (don't trust either), one source → it, none
+// → last-good, else the static fallback. 60s cache.
 export async function getSolUsdRate(): Promise<number> {
   const now = Date.now();
   if (_solUsdCache && now - _solUsdCache.atMs < 60_000) return _solUsdCache.rate;
-  try {
-    const r = await fetch(
-      `https://lite-api.jup.ag/price/v3?ids=${WSOL_MINT}`,
-      { signal: AbortSignal.timeout(4000) },
-    );
-    if (r.ok) {
-      const j = (await r.json()) as Record<string, { usdPrice?: number } | undefined>;
-      const p = j[WSOL_MINT]?.usdPrice;
-      if (typeof p === "number" && p > 0 && p < 100_000) {
-        _solUsdCache = { rate: p, atMs: now };
-        return p;
-      }
-    }
-  } catch { /* fall through to fallback */ }
-  return SOL_USD_RATE_FALLBACK;
+  const [jup, dex] = await Promise.all([jupiterSolUsd(), dexscreenerSolUsd()]);
+  let rate: number | null = null;
+  if (jup && dex) {
+    const hi = Math.max(jup, dex), lo = Math.min(jup, dex);
+    rate = hi / lo <= 3 ? jup : _solUsdLastGood; // agree → Jupiter; diverge → last-good
+  } else {
+    rate = jup ?? dex ?? _solUsdLastGood;
+  }
+  if (rate && rate > 0) {
+    _solUsdCache = { rate, atMs: now };
+    _solUsdLastGood = rate;
+    return rate;
+  }
+  // Both sources unusable + no last-good — static fallback (last resort; can be
+  // stale, so wSOL-denominated payment stays exact and unaffected).
+  return _solUsdLastGood ?? SOL_USD_RATE_FALLBACK;
 }
 
 export function usdcAtomicForLamports(amountLamports: bigint, solUsdRate: number): string {
