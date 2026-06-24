@@ -184,12 +184,15 @@ export async function buildRepayHandler(c: Context) {
     parsed = { error: "bot_returned_non_json", status: res.status };
   }
 
-  // 401/403 from the bot's internal auth = protocol misconfig (INTERNAL_API_TOKEN
-  // mismatch x402↔bot), never the agent's fault. Remap to 503 so the two-phase
-  // claim REFUNDS the payment instead of a charged-but-denied. (Same as build-borrow.)
-  if (res.status === 401 || res.status === 403) {
+  // Refund ONLY on the bot's internal-auth sentinel (401 {error:"unauthorized"} =
+  // INTERNAL_API_TOKEN mismatch x402↔bot, a protocol misconfig). SECURITY: a bare
+  // 403 is a legitimate, correctly-charged BUSINESS denial (loan_suspended,
+  // not_loan_borrower, …) — refunding it would let one payment re-drive the bot
+  // unthrottled. So 403 (and any non-sentinel 401) passes through UNCHANGED.
+  // (Same narrowing as build-borrow.)
+  if (res.status === 401 && parsed.error === "unauthorized") {
     console.error(
-      `[build-repay] bot internal-auth ${res.status} — INTERNAL_API_TOKEN mismatch (x402↔bot). Releasing claim; agent not charged.`,
+      `[build-repay] bot internal-auth 401 unauthorized — INTERNAL_API_TOKEN mismatch (x402↔bot). Releasing claim; agent not charged.`,
     );
     return c.json(
       {
