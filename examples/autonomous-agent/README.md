@@ -15,6 +15,7 @@ Magpie is the **bank** (lends SOL against a token you already hold) — it is **
 |---|---|
 | `magpie-playbook.ts` | The agent's **mental model** of Magpie — facts the code enforces + a `SYSTEM_PROMPT` to give an LLM brain so it *understands* the protocol. |
 | `loan-guardian.ts` | **The never-default engine.** Reserves repay SOL, repays early, retries forever. |
+| `holdings.ts` | What the wallet ALREADY holds that Magpie accepts — borrow against it directly, no buy. |
 | `repay.ts` | The repay leg via x402 `build-repay` (the published SDK has no `repay()` yet). |
 | `jupiter.ts` | The buy step (the one integration outside Magpie). |
 | `x402-client.ts` | Minimal x402 paid-call client (vendored so this folder deploys standalone). |

@@ -16,14 +16,15 @@
  *   LIVE=1 OPEN_UNIVERSE=true PREFERRED_CATEGORY=any \
  *     MAGPIE_PAYER_SECRET=<bs58|json> npx tsx examples/autonomous-agent/agent.ts
  */
-import { Keypair } from "@solana/web3.js";
+import { Keypair, Connection } from "@solana/web3.js";
 import { readFileSync } from "node:fs";
 import bs58 from "bs58";
 import { MagpieAgent } from "@magpieloans/magpie-agent";
 import { loadConfig, loadKeySources } from "./config.js";
 import { LoanGuardian } from "./loan-guardian.js";
 import { jupiterBuy } from "./jupiter.js";
-import { brainEnabled, chooseCandidateWithClaude } from "./brain.js";
+import { brainEnabled, chooseCandidateWithClaude, type MenuItem } from "./brain.js";
+import { getExistingCollateral } from "./holdings.js";
 import { Notifier } from "./notifier.js";
 import { RULES } from "./magpie-playbook.js";
 
@@ -109,37 +110,44 @@ async function runCycle(agent: MagpieAgent, guardian: LoanGuardian, notifier: No
   }
   log(`BRAIN — candidate: ${candidate.symbol} (${candidate.mint}) [${candidate.category}]`);
 
-  // 2) SOLVENCY — only ever spend what the guardian says is free (never the reserve).
-  const deployable = await guardian.deployableLamports();
-  let buyLamports = (deployable * 9n) / 10n; // keep 10% headroom on top of the reserve
-  if (cfg.maxBuyLamports > 0n && buyLamports > cfg.maxBuyLamports) buyLamports = cfg.maxBuyLamports;
-  log(`SOLVENCY — deployable ${fmt(deployable)} SOL; will buy with ${fmt(buyLamports)} SOL (reserve + gas held back).`);
-  if (buyLamports <= 0n) {
-    await notifier.send("hold", "Nothing deployable while keeping repay reserves — holding (never-default invariant doing its job).");
-    return;
+  // 2) ACQUIRE collateral — collateralize what we ALREADY hold (no buy), else buy it.
+  let collateralAmount: string;
+  if (candidate.existingAmount) {
+    collateralAmount = candidate.existingAmount;
+    log(`HELD — collateralizing existing ${candidate.symbol} (${collateralAmount} base units) — no buy, no slippage.`);
+    await notifier.send("info", `Collateralizing held ${candidate.symbol} directly (no buy needed).`);
+  } else {
+    // SOLVENCY — only ever spend what the guardian says is free (never the reserve).
+    const deployable = await guardian.deployableLamports();
+    let buyLamports = (deployable * 9n) / 10n; // keep 10% headroom on top of the reserve
+    if (cfg.maxBuyLamports > 0n && buyLamports > cfg.maxBuyLamports) buyLamports = cfg.maxBuyLamports;
+    log(`SOLVENCY — deployable ${fmt(deployable)} SOL; will buy with ${fmt(buyLamports)} SOL (reserve + gas held back).`);
+    if (buyLamports <= 0n) {
+      await notifier.send("hold", "Nothing deployable while keeping repay reserves — holding (never-default invariant doing its job).");
+      return;
+    }
+    // BUY on Jupiter (Magpie can't — it's a lender, not a DEX).
+    const buy = await jupiterBuy({
+      payer: agentKeypair(),
+      outputMint: candidate.mint,
+      amountLamports: buyLamports,
+      rpcUrl: cfg.rpcUrl,
+      dryRun: cfg.dryRun,
+    });
+    if (!buy.ok) {
+      await notifier.send("warn", `Buy of ${candidate.symbol} skipped/failed: ${buy.reason}`);
+      return;
+    }
+    await notifier.send(
+      "buy",
+      `${cfg.dryRun ? "Quoted" : "Bought"} ${buy.outAmount ?? "?"} ${candidate.symbol} for ${fmt(buyLamports)} SOL${buy.signature ? ` (tx ${buy.signature})` : ""}.`,
+    );
+    collateralAmount = buy.outAmount ?? "0";
   }
 
-  // 3) BUY on Jupiter (Magpie can't — it's a lender, not a DEX).
-  const buy = await jupiterBuy({
-    payer: agentKeypair(),
-    outputMint: candidate.mint,
-    amountLamports: buyLamports,
-    rpcUrl: cfg.rpcUrl,
-    dryRun: cfg.dryRun,
-  });
-  if (!buy.ok) {
-    await notifier.send("warn", `Buy of ${candidate.symbol} skipped/failed: ${buy.reason}`);
-    return;
-  }
-  await notifier.send(
-    "buy",
-    `${cfg.dryRun ? "Quoted" : "Bought"} ${buy.outAmount ?? "?"} ${candidate.symbol} for ${fmt(buyLamports)} SOL${buy.signature ? ` (tx ${buy.signature})` : ""}.`,
-  );
-
-  // 4) COLLATERALIZE on Magpie — only through safeBorrow, which refuses if it
+  // 3) COLLATERALIZE on Magpie — only through safeBorrow, which refuses if it
   //    can't honor the resulting deadline, registers the loan + reserve, and
   //    DMs the borrow. The guardian then repays it (via repay.ts) well early.
-  const collateralAmount = buy.outAmount ?? "0";
   await guardian.safeBorrow({ collateralMint: candidate.mint, collateralAmount });
 
   // NOTE: in-vault exit arming (TP/SL) is NOT in the published SDK (0.1.x), so
@@ -154,11 +162,16 @@ async function runCycle(agent: MagpieAgent, guardian: LoanGuardian, notifier: No
   }
 }
 
-/** Safe candidate selection: allowlist/open-universe, eligibility + risk gated. */
-async function chooseCandidate(
-  agent: MagpieAgent,
-  notifier: Notifier,
-): Promise<{ mint: string; symbol: string; category: string } | null> {
+interface Candidate {
+  mint: string;
+  symbol: string;
+  category: string;
+  /** Raw u64 collateral amount when the wallet ALREADY holds this (no buy needed). */
+  existingAmount?: string;
+}
+
+/** Safe candidate selection: existing holdings + allowlist/open-universe, risk gated. */
+async function chooseCandidate(agent: MagpieAgent, notifier: Notifier): Promise<Candidate | null> {
   const { tokens } = await agent.collateralCatalog();
   const byMint = new Map(tokens.map((t) => [t.mint, t]));
 
@@ -168,23 +181,46 @@ async function chooseCandidate(
     cfg.preferredCategory === "any" ||
     (cfg.preferredCategory === "memecoin" ? cat === "memecoin" : cat !== "memecoin");
 
-  let pool: Array<{ mint: string; symbol: string; decimals: number; category: string }>;
+  // 1) What the wallet ALREADY holds that Magpie accepts (collateralize directly, no buy).
+  const heldMap = new Map<string, string>(); // mint -> raw amount
+  const self = agent.publicKey();
+  if (cfg.useExistingHoldings && self) {
+    try {
+      const held = await getExistingCollateral(new Connection(cfg.rpcUrl, "confirmed"), self, tokens);
+      for (const h of held) heldMap.set(h.mint, h.amount);
+      if (held.length) log(`HOLDINGS — wallet already holds ${held.length} approved token(s): ${held.map((h) => h.symbol).join(", ")}`);
+    } catch (err) {
+      log(`HOLDINGS — could not read existing balances: ${(err as Error).message}`);
+    }
+  }
+  const heldCandidates: MenuItem[] = tokens
+    .filter((t) => heldMap.has(t.mint) && matches(t.category))
+    .map((t) => ({ ...t, held: true }));
+
+  // 2) Buy candidates (need a Jupiter buy): allowlist / open-universe / dry-run.
+  let buyPool: Array<{ mint: string; symbol: string; decimals: number; category: string }>;
   if (cfg.mintAllowlist.length) {
-    pool = cfg.mintAllowlist.map((m) => byMint.get(m)).filter(Boolean) as typeof tokens;
-    const pref = pool.filter((t) => matches(t.category));
-    if (pref.length) pool = pref; // prefer the category among allowlisted, else use all allowlisted
+    buyPool = cfg.mintAllowlist.map((m) => byMint.get(m)).filter(Boolean) as typeof tokens;
+    const pref = buyPool.filter((t) => matches(t.category));
+    if (pref.length) buyPool = pref;
   } else if (cfg.dryRun || cfg.openUniverse) {
-    // dry-run, or LIVE open-universe: pick from Magpie's vetted approved catalog,
-    // filtered by preferred category, risk-gated below.
-    pool = tokens.filter((t) => matches(t.category));
+    buyPool = tokens.filter((t) => matches(t.category));
   } else {
-    pool = []; // live + no allowlist + not open-universe → buy nothing
+    buyPool = []; // live + no allowlist + not open-universe → no fresh buys
+  }
+
+  // Held first (cheapest), then buy candidates; dedup by mint.
+  const seen = new Set<string>();
+  const pool: MenuItem[] = [];
+  for (const t of [...heldCandidates, ...buyPool.map((t) => ({ ...t, held: heldMap.has(t.mint) }))]) {
+    if (seen.has(t.mint)) continue;
+    seen.add(t.mint);
+    pool.push(t);
   }
   if (!pool.length) return null;
 
   // BRAIN — Claude proposes from the allowed menu (and may say HOLD); on any
-  // failure or no key, fall back to the deterministic first pick. The model can
-  // ONLY choose a mint that's already in the safe menu.
+  // failure or no key, fall back to the deterministic first pick (held-first).
   let pick = pool[0];
   if (brainEnabled()) {
     try {
@@ -218,7 +254,7 @@ async function chooseCandidate(
       return null;
     }
   }
-  return { mint: pick.mint, symbol: pick.symbol, category: pick.category };
+  return { mint: pick.mint, symbol: pick.symbol, category: pick.category, existingAmount: heldMap.get(pick.mint) };
 }
 
 // The SDK keeps the keypair private; for the Jupiter leg we need to sign

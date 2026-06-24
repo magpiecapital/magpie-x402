@@ -19,6 +19,8 @@ export interface MenuItem {
   symbol: string;
   decimals: number;
   category: string;
+  /** True if the wallet ALREADY holds this — collateralize it directly, no buy. */
+  held?: boolean;
 }
 
 export interface BrainDecision {
@@ -85,12 +87,16 @@ async function runTool(
 }
 
 function taskPrompt(cfg: AgentConfig, menu: MenuItem[]): string {
-  const list = menu.map((m) => `- ${m.symbol}  ${m.mint}  [${m.category}]`).join("\n");
+  const list = menu
+    .map((m) => `- ${m.symbol}  ${m.mint}  [${m.category}]${m.held ? "  (ALREADY HELD — collateralize directly, no buy needed)" : ""}`)
+    .join("\n");
   return [
-    "Choose ONE collateral asset to buy-and-collateralize, or decide to HOLD.",
+    "Choose ONE collateral asset to collateralize (buy first if not already held), or decide to HOLD.",
     "",
     "ALLOWED MENU — you may ONLY pick a mint from this list; anything else is rejected:",
     list,
+    "",
+    "Prefer assets marked ALREADY HELD when sensible — they cost no buy + no slippage.",
     "",
     "Constraints:",
     `- Preferred category: ${cfg.preferredCategory}. RWAs (stocks) are far safer; memecoins are high-risk.`,
