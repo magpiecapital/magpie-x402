@@ -239,8 +239,55 @@ export function x402Required(config: X402Config): MiddlewareHandler {
       }
     }
 
-    await next();
+    // ── Two-phase claim release (audit FIX 3) ──
+    // The signature was claimed (in-process + durable) BEFORE next() to enforce
+    // single-use. If the downstream handler then FAILS for an infra reason —
+    // throws, or returns a 5xx (bot 502 / timeout / non-JSON / onError 500) —
+    // the agent paid but got nothing, and the consumed claim would block a retry
+    // (payment_already_consumed) → the agent loses its SOL with no recourse.
+    // Release the claim (and reverse the holder accrual) on infra failure so the
+    // SAME payment re-drives the handler within the 10-min nonce window. NEVER
+    // release on 2xx (served) or 4xx (agent-fault: bad params / doomed sim) —
+    // else an attacker could re-drive the handler repeatedly on one payment.
+    try {
+      await next();
+    } catch (err) {
+      releaseClaim(sig);
+      throw err;
+    }
+    if (c.res && c.res.status >= 500) {
+      releaseClaim(sig);
+    }
   };
+}
+
+// Release a previously-claimed native-rail signature so a paid agent can retry
+// the SAME payment when the downstream handler failed for an infra reason.
+// (audit FIX 3) — drops the in-process guard immediately (same-instance retry)
+// and asks the bot to un-claim + reverse the holder accrual durably.
+function releaseClaim(sig: string): void {
+  if (!sig) return;
+  consumedSignatures.delete(sig);
+  void releasePaidCall(sig);
+}
+
+async function releasePaidCall(sig: string): Promise<void> {
+  if (!INTERNAL_TOKEN_FOR_METRICS) return;
+  try {
+    await fetch(`${BOT_API_FOR_METRICS}/api/v1/internal/x402/release`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Internal-Token": INTERNAL_TOKEN_FOR_METRICS,
+      },
+      body: JSON.stringify({ tx_signature: sig }),
+      signal: AbortSignal.timeout(3_000),
+    });
+  } catch {
+    // Best-effort. The in-process delete already lets a same-instance retry
+    // through; the 10-min nonce TTL bounds the worst case (re-pay with a fresh
+    // nonce). Never throws into the response path.
+  }
 }
 
 // ── Circuit breaker for the durable single-use claim (audit FIX 1) ──
