@@ -193,20 +193,39 @@ export async function buildBorrowHandler(c: Context) {
   // — a success-then-throw that can leave a loan unrepaid. ADD the camelCase
   // aliases (snake_case kept for any direct/curl consumer).
   if (res.ok && parsed.summary && typeof parsed.summary === "object") {
-    const s = parsed.summary as Record<string, unknown>;
-    const toLamports = (sol: unknown) =>
-      sol == null ? undefined : String(Math.round(Number(sol) * 1e9));
     parsed = {
       ...parsed,
-      summary: {
-        ...s,
-        loanId: s.loanId ?? s.loan_id,
-        borrowableLamports: s.borrowableLamports ?? toLamports(s.principal_sol),
-        feeLamports: s.feeLamports ?? toLamports(s.fee_sol),
-      },
+      summary: adaptBorrowSummary(parsed.summary as Record<string, unknown>),
     };
   }
   return c.json(parsed, res.status as never);
+}
+
+/**
+ * SUMMARY field-shape adapter (CONTRACT — pinned by build-borrow.test.ts).
+ *
+ * The bot returns the borrow summary in snake_case + SOL
+ * (`loan_id`, `principal_sol`, `fee_sol`), but the SDK reads camelCase +
+ * lamports (`loanId`, `borrowableLamports`, `feeLamports`). Drift across this
+ * boundary once threw `Cannot convert undefined to a BigInt` in the SDK AFTER
+ * the loan had already opened on-chain — a success-then-throw that can leave a
+ * loan unrepaid.
+ *
+ * This transform ADDS the camelCase aliases while KEEPING every snake_case
+ * field intact (so any direct/curl consumer is unaffected). The `??` chains
+ * preserve a camelCase value if the bot ever already provides one. A null /
+ * missing SOL amount maps to `undefined` (NOT a throw) — surfacing the
+ * absence to the caller rather than crashing inside the adapter.
+ */
+export function adaptBorrowSummary(s: Record<string, unknown>): Record<string, unknown> {
+  const toLamports = (sol: unknown) =>
+    sol == null ? undefined : String(Math.round(Number(sol) * 1e9));
+  return {
+    ...s,
+    loanId: s.loanId ?? s.loan_id,
+    borrowableLamports: s.borrowableLamports ?? toLamports(s.principal_sol),
+    feeLamports: s.feeLamports ?? toLamports(s.fee_sol),
+  };
 }
 
 /** Map known bot rejection codes to an agent-actionable hint. */
