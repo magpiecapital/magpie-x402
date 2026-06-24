@@ -97,7 +97,14 @@ app.use("*", cors({
   ],
 }));
 app.use("*", logger());
-app.use("/api/*", rateLimit);
+// Per-IP rate limiter — but NEVER rate-limit an x402 payment redeem/retry
+// (carries x-payment or PAYMENT-SIGNATURE). A bursting agent retrying its paid
+// call must not get 429'd past the 10-min nonce TTL into an unredeemable
+// payment (charged-but-denied). (audit MEDIUM #4.)
+app.use("/api/*", async (c, next) => {
+  if (c.req.header("x-payment") || c.req.header("payment-signature")) return next();
+  return rateLimit(c, next);
+});
 app.use("/", rateLimit);
 
 // Cap request body size BEFORE any route handler buffers it. Every
