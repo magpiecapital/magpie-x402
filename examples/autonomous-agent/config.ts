@@ -18,6 +18,12 @@ export interface AgentConfig {
    * allowlist), still risk-gated. Set OPEN_UNIVERSE=true for an actively-trading agent.
    */
   openUniverse: boolean;
+  /**
+   * Prefer collateralizing tokens the wallet ALREADY holds (e.g. its BONK) over
+   * buying fresh — cheaper, no Jupiter slippage. Default true. The agent still
+   * falls back to buying when it holds nothing borrowable in the chosen category.
+   */
+  useExistingHoldings: boolean;
   /** Reject any candidate whose Magpie token-risk score exceeds this (0-100, lower = safer). */
   maxTokenRisk: number;
   /** Preferred collateral class. 'rwa' is the materially safer path; 'any' = memecoins + RWAs. */
@@ -82,6 +88,7 @@ export function loadConfig(): AgentConfig {
       .map((s) => s.trim())
       .filter(Boolean),
     openUniverse: process.env.OPEN_UNIVERSE === "true",
+    useExistingHoldings: process.env.USE_EXISTING_HOLDINGS !== "false",
     maxTokenRisk: num(process.env.MAX_TOKEN_RISK, 60),
     preferredCategory: (process.env.PREFERRED_CATEGORY as AgentConfig["preferredCategory"]) ?? "rwa",
 
