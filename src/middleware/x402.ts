@@ -325,18 +325,19 @@ function noteClaimResolved(): void {
   claimDegradedUntilMs = 0;
 }
 
-// Fire-and-forget. Errors swallowed — metrics are best-effort.
-// 3s timeout caps per-invocation latency contribution to ~0ms in the
-// happy path (we don't await) and 3s upper bound if a Promise leak
-// somehow tries to drain it.
+// NOTE (audit low #10): this is AWAITED in the gate (it's the durable
+// single-use claim, not fire-and-forget), so its 3s timeout is a real
+// worst-case latency contribution on the paid path — not "~0ms". The billing
+// metric rides along on the same call.
 const BOT_API_FOR_METRICS = process.env.MAGPIE_BOT_API || "https://magpie-bot-production.up.railway.app";
 const INTERNAL_TOKEN_FOR_METRICS = process.env.INTERNAL_API_TOKEN || "";
 // Records the paid call AND serves as the durable, cross-instance single-use
 // claim. Returns { fresh: true } when this signature was claimed for the first
 // time, { fresh: false } when it was already spent (replay), {} when the bot
 // recorded but gave no freshness signal (e.g. a db blip), or null on any infra
-// error. The middleware treats fresh===false as a replay and everything else as
-// allow (FAIL OPEN) — a transient bot/DB issue must never block a paid call.
+// error. The middleware treats fresh===false as a replay; null/{} FAIL CLOSED
+// by default (audit FIX 1) with a circuit breaker that briefly fails open only
+// during a proven sustained outage — NOT an unconditional fail-open.
 async function recordPaidCall(rec: {
   endpointPath: string;
   method: string;
@@ -345,7 +346,7 @@ async function recordPaidCall(rec: {
   txSignature: string;
   nonce: string;
 }): Promise<{ fresh?: boolean } | null> {
-  if (!INTERNAL_TOKEN_FOR_METRICS) return null; // can't claim without auth → fail open
+  if (!INTERNAL_TOKEN_FOR_METRICS) return null; // no internal token → can't establish single-use; gate decides (fail-closed w/ breaker)
   try {
     const res = await fetch(`${BOT_API_FOR_METRICS}/api/v1/internal/x402/record`, {
       method: "POST",
@@ -367,8 +368,8 @@ async function recordPaidCall(rec: {
     if (j && typeof j === "object" && "fresh" in j) {
       return { fresh: Boolean((j as { fresh?: unknown }).fresh) };
     }
-    return {}; // recorded but no freshness signal → fail open
+    return {}; // recorded but no freshness signal → gate fails closed w/ breaker
   } catch {
-    return null; // infra error → fail open
+    return null; // infra error → gate fails closed w/ breaker
   }
 }

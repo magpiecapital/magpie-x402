@@ -72,7 +72,14 @@ function hostOf(u: string): string {
 }
 
 export function standardRailEnabled(): boolean {
-  return process.env.X402_STANDARD_RAIL_ENABLED === "true";
+  if (process.env.X402_STANDARD_RAIL_ENABLED !== "true") return false;
+  // Require a valid payTo (audit low #2): without it the challenge + settle would
+  // throw a 500 mid-flight (after the facilitator moved funds = charged-but-denied).
+  // Gate the WHOLE standard rail off instead, so the native rail + free reads stay
+  // up; the boot assertion below logs why.
+  const p = process.env.MAGPIE_PAY_TO;
+  if (!p) return false;
+  try { new PublicKey(p); return true; } catch { return false; }
 }
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -211,10 +218,27 @@ export async function buildSplAccepts(endpoint: string, amountLamports: bigint, 
   return accepts;
 }
 
+let _payToCache: string | null = null;
 function getPayTo(): string {
+  if (_payToCache) return _payToCache;
   const p = process.env.MAGPIE_PAY_TO;
   if (!p) throw new Error("[x402-standard] MAGPIE_PAY_TO unset");
+  try { new PublicKey(p); } catch { throw new Error("[x402-standard] MAGPIE_PAY_TO is not a valid base58 pubkey"); }
+  _payToCache = p;
   return p;
+}
+
+// Boot-time config check (audit low #2): if the operator turned the standard
+// rail ON but MAGPIE_PAY_TO is missing/invalid, standardRailEnabled() silently
+// gates it OFF (above). Log that loudly at boot so the operator knows why
+// USDC/wSOL isn't being advertised — without taking down the native rail/reads.
+export function assertStandardRailConfig(): void {
+  if (process.env.X402_STANDARD_RAIL_ENABLED === "true" && !standardRailEnabled()) {
+    console.error(
+      "[x402-standard] X402_STANDARD_RAIL_ENABLED=true but MAGPIE_PAY_TO is missing/invalid — " +
+      "standard (USDC/wSOL) rail DISABLED. Set a valid MAGPIE_PAY_TO pubkey to enable it.",
+    );
+  }
 }
 
 // ── On-chain settlement verification (NEVER trust the facilitator's word) ─────
@@ -292,6 +316,14 @@ async function verifySplSettlementOnChain(
 
   const top = tx.transaction.message.instructions || [];
   const inner = (tx.meta?.innerInstructions || []).flatMap((i) => i.instructions);
+  // SUM all matching transfers into our payTo ATA (audit low #3): a payment
+  // split across multiple legs (each < minAmount but summing >= minAmount) is a
+  // valid settlement and must not be charged-but-denied. Pin the payer to the
+  // first valid leg and only count legs from that SAME authority — so an
+  // attacker can't reach the threshold by piggybacking on someone else's
+  // unrelated transfer into the same ATA.
+  let sum = 0n;
+  let payer: string | null = null;
   for (const ix of [...top, ...inner]) {
     if (!("parsed" in ix)) continue;
     const program = (ix as { program?: string }).program;
@@ -300,19 +332,22 @@ async function verifySplSettlementOnChain(
     if (!p || (p.type !== "transfer" && p.type !== "transferChecked")) continue;
     const info = p.info ?? {};
     if (info.destination !== expectedAta) continue;
+    // transferChecked also carries the mint — assert it (defense in depth).
+    if (p.type === "transferChecked" && typeof info.mint === "string" && info.mint !== reqd.asset) continue;
     const amtStr = p.type === "transferChecked"
       ? (info.tokenAmount as { amount?: string } | undefined)?.amount
       : (info.amount as string | undefined);
     if (typeof amtStr !== "string") continue;
     let amt: bigint;
     try { amt = BigInt(amtStr); } catch { continue; }
-    if (amt < minAmount) continue;
-    // transferChecked also carries the mint — assert it (defense in depth).
-    if (p.type === "transferChecked" && typeof info.mint === "string" && info.mint !== reqd.asset) continue;
-    const payer = info.authority ?? info.multisigAuthority ?? info.source;
-    if (typeof payer !== "string") continue;
-    try { new PublicKey(payer); } catch { continue; }
-    return { payer };
+    if (amt <= 0n) continue;
+    const legPayer = info.authority ?? info.multisigAuthority ?? info.source;
+    if (typeof legPayer !== "string") continue;
+    try { new PublicKey(legPayer); } catch { continue; }
+    if (payer === null) payer = legPayer;
+    else if (legPayer !== payer) continue;
+    sum += amt;
+    if (sum >= minAmount) return { payer };
   }
   return null;
 }

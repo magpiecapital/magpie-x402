@@ -13,7 +13,11 @@ import { secureHeaders } from "hono/secure-headers";
 import { bodyLimit } from "hono/body-limit";
 import { x402Required } from "./middleware/x402.js";
 import { rateLimit } from "./middleware/rate-limit.js";
-import { standardRailEnabled, SOLANA_CAIP2, USDC_MINT, WSOL_MINT } from "./lib/x402-standard.js";
+import { standardRailEnabled, assertStandardRailConfig, SOLANA_CAIP2, USDC_MINT, WSOL_MINT } from "./lib/x402-standard.js";
+
+// Boot-time config check — logs loudly if the standard rail is enabled but
+// MAGPIE_PAY_TO is missing/invalid (audit low #2). Runs once per cold start.
+assertStandardRailConfig();
 import { creditScoreHandler } from "./routes/credit-score.js";
 import { poolHandler, poolsAggregateHandler } from "./routes/pool.js";
 import { loanHandler, loanByPdaHandler } from "./routes/loan.js";
