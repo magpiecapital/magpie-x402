@@ -128,7 +128,7 @@ export async function chooseCandidateWithClaude(
     });
 
     const toolResults: Array<{ type: "tool_result"; tool_use_id: string; content: string }> = [];
-    for (const block of resp.content as Array<Record<string, unknown>>) {
+    for (const block of resp.content as unknown as Array<Record<string, unknown>>) {
       if (block.type !== "tool_use") continue;
       if (block.name === "submit_decision") {
         const d = block.input as Partial<BrainDecision>;

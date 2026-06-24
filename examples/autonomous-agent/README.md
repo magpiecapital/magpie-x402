@@ -15,24 +15,52 @@ Magpie is the **bank** (lends SOL against a token you already hold) — it is **
 |---|---|
 | `magpie-playbook.ts` | The agent's **mental model** of Magpie — facts the code enforces + a `SYSTEM_PROMPT` to give an LLM brain so it *understands* the protocol. |
 | `loan-guardian.ts` | **The never-default engine.** Reserves repay SOL, repays early, retries forever. |
+| `repay.ts` | The repay leg via x402 `build-repay` (the published SDK has no `repay()` yet). |
 | `jupiter.ts` | The buy step (the one integration outside Magpie). |
+| `x402-client.ts` | Minimal x402 paid-call client (vendored so this folder deploys standalone). |
+| `brain.ts` | The optional Claude decision brain (proposes; the safety layer disposes). |
+| `notifier.ts` | Passive monitoring — DMs every action to Telegram (console fallback). |
 | `config.ts` | Every safety knob; every default is the safe choice. |
-| `agent.ts` | Orchestrator: guard-first, then brain → buy → collateralize. |
+| `agent.ts` | Orchestrator: guard-first, then a continuous research → buy → collateralize loop. |
+| `Dockerfile` · `package.json` · `.env.example` | Standalone deploy (Railway / any container host). |
 
-## Run it
+## Run it (continuous, monitored)
+The agent runs a **continuous loop**: the guardian protects every loan for the whole
+process lifetime, and a research cycle fires every `CYCLE_INTERVAL_MIN` to maybe open a
+new position — always inside the solvency reserve + `MAX_OPEN_LOANS`. Every action is
+DM'd so you can watch it passively. **Always start in dry-run.**
+
 ```bash
-# 1) Rehearse — free, safe, nothing moves (does live read-only calls):
-MAGPIE_PAYER_KEYPAIR=~/.config/solana/id.json \
-  npx tsx examples/autonomous-agent/agent.ts
+cd examples/autonomous-agent && npm install
 
-# 2) Go live — reads MINT_ALLOWLIST, spends real funds from the agent wallet:
-LIVE=1 \
-  MINT_ALLOWLIST=<mint1>,<mint2> \
-  PREFERRED_CATEGORY=rwa \
+# 1) Rehearse continuously — free, safe, nothing moves (real reads + decisions):
+MAGPIE_PAYER_KEYPAIR=~/.config/solana/agent-wallet.json \
+  CYCLE_INTERVAL_MIN=2 npm start          # fast cadence to preview; Ctrl-C to stop
+
+# 2) Go live — actively trades memecoins + RWAs, spends real funds:
+LIVE=1 OPEN_UNIVERSE=true PREFERRED_CATEGORY=any \
   MAGPIE_PAYER_KEYPAIR=~/.config/solana/agent-wallet.json \
-  npx tsx examples/autonomous-agent/agent.ts
+  ANTHROPIC_API_KEY=sk-ant-... npm start
 ```
 Use a **dedicated allowance wallet** funded with only what you're willing to risk (e.g. $500) — never your main wallet.
+
+## Deploy always-on (Railway)
+Run it 24/7 so you truly monitor passively. The key is set as a **secret env var** —
+it lives only in this process; Magpie never sees it.
+
+1. New Railway service → point it at this repo, **Root Directory** `examples/autonomous-agent`.
+2. Set Variables (see `.env.example`). Minimum to go live:
+   - `MAGPIE_PAYER_SECRET` — the agent wallet key (bs58 **or** a JSON byte array)
+   - `SOLANA_RPC_URL` — a paid RPC (Helius/Triton) for an always-on agent
+   - `ANTHROPIC_API_KEY` — the Claude brain (optional; falls back to a deterministic picker)
+   - `LIVE=1`, `OPEN_UNIVERSE=true`, `PREFERRED_CATEGORY=any`
+   - `AGENT_NOTIFY_TELEGRAM_TOKEN` + `AGENT_NOTIFY_TELEGRAM_CHAT` — for the DMs
+3. **Deploy with `LIVE` unset first** (dry-run). Watch the DMs for a few cycles, confirm the
+   decisions look sane, then add `LIVE=1` and redeploy.
+
+> Repay path: the published `@magpieloans/magpie-agent` (0.1.x) has **no `repay()`**, so the
+> guardian repays via the x402 `build-repay` HTTP endpoint (`repay.ts`). Borrow + reads use
+> the SDK. When the SDK ships `repay()`, `repay.ts` can be swapped for `agent.repay()`.
 
 ## How "never default" is guaranteed
 The `LoanGuardian` holds three invariants:
