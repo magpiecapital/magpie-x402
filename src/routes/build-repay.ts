@@ -184,6 +184,23 @@ export async function buildRepayHandler(c: Context) {
     parsed = { error: "bot_returned_non_json", status: res.status };
   }
 
+  // 401/403 from the bot's internal auth = protocol misconfig (INTERNAL_API_TOKEN
+  // mismatch x402↔bot), never the agent's fault. Remap to 503 so the two-phase
+  // claim REFUNDS the payment instead of a charged-but-denied. (Same as build-borrow.)
+  if (res.status === 401 || res.status === 403) {
+    console.error(
+      `[build-repay] bot internal-auth ${res.status} — INTERNAL_API_TOKEN mismatch (x402↔bot). Releasing claim; agent not charged.`,
+    );
+    return c.json(
+      {
+        error: "agent_api_unavailable",
+        detail:
+          "Magpie's agent API is temporarily unavailable (server configuration). Your payment was NOT consumed — please retry shortly.",
+      },
+      503,
+    );
+  }
+
   // Pre-sim gate: only when the bot returned a built tx. On any bot error
   // (non-2xx) pass it straight through unchanged.
   const txB64 =
