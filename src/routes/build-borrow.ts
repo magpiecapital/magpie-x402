@@ -151,6 +151,25 @@ export async function buildBorrowHandler(c: Context) {
     console.warn(`[build-borrow] non-JSON from bot (status ${res.status}):`, text.slice(0, 300));
     parsed = { error: "bot_returned_non_json", status: res.status };
   }
+  // A 401/403 from the bot's INTERNAL auth means our X-Internal-Token doesn't
+  // match the bot's INTERNAL_API_TOKEN — a PROTOCOL MISCONFIG, never the agent's
+  // fault. Pass-through would surface as a 4xx, and the two-phase claim only
+  // refunds on 5xx → the agent would be charged-but-denied. Remap to 503 so the
+  // claim RELEASES and the payment is NOT consumed. (Root-cause: align
+  // INTERNAL_API_TOKEN across the x402 service and the bot.)
+  if (res.status === 401 || res.status === 403) {
+    console.error(
+      `[build-borrow] bot internal-auth ${res.status} — INTERNAL_API_TOKEN mismatch (x402↔bot). Releasing claim; agent not charged.`,
+    );
+    return c.json(
+      {
+        error: "agent_api_unavailable",
+        detail:
+          "Magpie's agent API is temporarily unavailable (server configuration). Your payment was NOT consumed — please retry shortly.",
+      },
+      503,
+    );
+  }
   // Classify-before-friendly: when the bot rejects a (would-be) V4 borrow for
   // a known reason, attach a typed hint + retryability so the agent can react
   // programmatically instead of parsing an opaque string. We AUGMENT, never
