@@ -24,7 +24,7 @@
  * why the guardian also needs the signing keypair.
  */
 import { Connection, PublicKey, Keypair } from "@solana/web3.js";
-import type { MagpieAgent, LoanInfo, TierName } from "@magpieloans/magpie-agent";
+import type { MagpieAgent, TierName } from "@magpieloans/magpie-agent";
 import type { AgentConfig } from "./config.js";
 import type { Notifier } from "./notifier.js";
 import { repayLoan } from "./repay.js";
@@ -59,9 +59,15 @@ interface NLoan {
   status: string;
 }
 
-/** Read camelCase first, snake_case as fallback — robust to both SDK response shapes. */
-function norm(raw: LoanInfo): NLoan {
-  const o = raw as unknown as Record<string, unknown>;
+/**
+ * Read camelCase first, snake_case as fallback — robust to both SDK response
+ * shapes. Typed shape-agnostic (Record) on purpose: the SDK's walletLoans()
+ * return changed from LoanInfo (snake_case, 0.1.x) to AgentLoan (camelCase,
+ * 0.2.x); norm reads every field dynamically via pick(), so it handles either
+ * without depending on the exact SDK loan type.
+ */
+function norm(raw: Record<string, unknown>): NLoan {
+  const o = raw;
   const pick = (...keys: string[]): unknown => {
     for (const k of keys) if (o[k] != null) return o[k];
     return undefined;
@@ -225,7 +231,7 @@ export class LoanGuardian {
     let active: NLoan[];
     try {
       const r = await this.agent.walletLoans(this.self, { status: "active" });
-      active = r.loans.map(norm).filter((l) => l.status === "active" && l.loanId);
+      active = (r.loans as unknown as Record<string, unknown>[]).map(norm).filter((l) => l.status === "active" && l.loanId);
     } catch (err) {
       log(`sync failed (will retry next tick): ${(err as Error).message}`);
       return;
@@ -319,7 +325,7 @@ export class LoanGuardian {
 
   private async findActiveLoan(loanId: string): Promise<NLoan | undefined> {
     const r = await this.agent.walletLoans(this.self, { status: "active" });
-    return r.loans.map(norm).find((l) => l.loanId === loanId && l.status === "active");
+    return (r.loans as unknown as Record<string, unknown>[]).map(norm).find((l) => l.loanId === loanId && l.status === "active");
   }
 
   /** For dashboards/logging. */
