@@ -22,7 +22,7 @@ import bs58 from "bs58";
 import { MagpieAgent } from "@magpieloans/magpie-agent";
 import { loadConfig, loadKeySources } from "./config.js";
 import { LoanGuardian } from "./loan-guardian.js";
-import { jupiterBuy } from "./jupiter.js";
+import { jupiterBuy, jupiterValueInSol } from "./jupiter.js";
 import { brainEnabled, chooseCandidateWithClaude, type MenuItem } from "./brain.js";
 import { getExistingCollateral } from "./holdings.js";
 import { Notifier } from "./notifier.js";
@@ -165,6 +165,32 @@ async function runCycle(agent: MagpieAgent, guardian: LoanGuardian, notifier: No
       `${cfg.dryRun ? "Quoted" : "Bought"} ${buy.outAmount ?? "?"} ${candidate.symbol} for ${fmt(buyLamports)} SOL${buy.signature ? ` (tx ${buy.signature})` : ""}.`,
     );
     collateralAmount = buy.outAmount ?? "0";
+  }
+
+  // 2b) MIN-COLLATERAL GATE — never pay the build-borrow x402 fee on collateral
+  //     too small to clear a real loan (e.g. dust the wallet already holds). The
+  //     held-collateral path does NOT go through the MAX_BUY_SOL sizing, so this
+  //     is the only floor protecting it. Value the collateral in SOL via Jupiter;
+  //     skip below the floor. A null quote (transient / no route) is NOT treated
+  //     as below-floor — skipping a borrow is always safe, but we don't want a
+  //     Jupiter blip to silently block borrowing, so null proceeds.
+  if (cfg.minCollateralLamports > 0n) {
+    const takerPk = agent.publicKey();
+    const valueLamports = takerPk
+      ? await jupiterValueInSol({
+          inputMint: candidate.mint,
+          amountBaseUnits: BigInt(collateralAmount),
+          taker: takerPk.toBase58(),
+        })
+      : null;
+    if (valueLamports !== null && valueLamports < cfg.minCollateralLamports) {
+      await notifier.send(
+        "hold",
+        `Skipping ${candidate.symbol}: collateral worth ~${fmt(valueLamports)} SOL is below the ` +
+          `${fmt(cfg.minCollateralLamports)} SOL minimum — not paying a build-borrow fee on a too-small loan.`,
+      );
+      return;
+    }
   }
 
   // 3) COLLATERALIZE on Magpie — only through safeBorrow, which refuses if it
