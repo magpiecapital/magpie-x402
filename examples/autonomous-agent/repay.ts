@@ -12,6 +12,7 @@
  */
 import { Connection, Keypair, Transaction } from "@solana/web3.js";
 import { paidCall } from "./x402-client.js";
+import { assertFeePayerIsSelf } from "./tx-guard.js";
 import type { AgentConfig } from "./config.js";
 
 export interface RepayResult {
@@ -34,6 +35,10 @@ export async function repayLoan(
   }
   // Legacy tx (matches the SDK's signAndSubmit). Borrower signs + submits; no cosign.
   const tx = Transaction.from(Buffer.from(data.partial_signed_tx_b64, "base64"));
+  // SECURITY — the borrower pays the repay; the fee payer MUST be us. Refuse to
+  // sign a substituted tx whose payer is someone else (defense-in-depth on a
+  // server-built tx). Repay always re-attempts later, so a refusal is safe.
+  assertFeePayerIsSelf(tx, keypair.publicKey, "build-repay");
   tx.partialSign(keypair);
   const conn = new Connection(cfg.rpcUrl, "confirmed");
   const sig = await conn.sendRawTransaction(tx.serialize());
