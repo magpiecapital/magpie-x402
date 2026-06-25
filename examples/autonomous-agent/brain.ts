@@ -13,6 +13,7 @@
 import type { MagpieAgent } from "@magpieloans/magpie-agent";
 import type { AgentConfig } from "./config.js";
 import { SYSTEM_PROMPT } from "./magpie-playbook.js";
+import { cachedTokenRisk } from "./risk-cache.js";
 
 export interface MenuItem {
   mint: string;
@@ -92,7 +93,10 @@ async function runTool(
           note: "DRY-RUN heuristic estimate (no payment made). Treat it as a usable score to rehearse the full borrow flow; in LIVE this is a real paid risk assessment.",
         };
       }
-      return await agent.tokenRisk(mint);
+      // Cached: a token is paid for (0.001 SOL) at most once per RISK_CACHE_TTL_MIN,
+      // even though the brain re-evaluates the same mints every cycle.
+      const r = await cachedTokenRisk(agent, mint);
+      return r.raw;
     }
     if (name === "get_pool_state") return await agent.poolState();
     return { error: `unknown tool ${name}` };
@@ -179,4 +183,181 @@ export async function chooseCandidateWithClaude(
     }
   }
   return { action: "hold", reasoning: "tool-call budget exhausted without a decision — holding for safety", confidence: 0 };
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// TRADE BRAIN — manage a spot memecoin book: decide EXITS (sell) and ENTRIES (buy).
+// ───────────────────────────────────────────────────────────────────────────
+
+/** A position the agent currently holds, already marked to market. */
+export interface TradePosition {
+  mint: string;
+  symbol: string;
+  /** Current SOL value of the position (lamports), from a live Jupiter quote. */
+  valueLamports: bigint;
+  /** SOL originally spent (lamports), if a cost basis is known (else undefined). */
+  costLamports?: bigint;
+  /** Profit/loss vs cost basis as a percent, if known. */
+  pnlPct?: number;
+  /** Minutes since first acquired, if known. */
+  ageMin?: number;
+}
+
+/** A memecoin the agent MAY buy this cycle. */
+export interface TradeCandidate {
+  mint: string;
+  symbol: string;
+  category: string;
+}
+
+export interface TradeDecision {
+  sells: string[]; // mints from the positions list
+  buys: string[]; // mints from the candidate menu
+  reasoning: string;
+  confidence: number;
+}
+
+const TRADE_TOOLS = [
+  {
+    name: "assess_token_risk",
+    description:
+      "Magpie's risk profile for a mint: risk_score 0-100 (lower=safer), dimension breakdown, and market_data (liquidity, 24h volume, market cap). Cached — call freely. In dry-run it's a category stub.",
+    input_schema: { type: "object", properties: { mint: { type: "string" } }, required: ["mint"] },
+  },
+  {
+    name: "submit_trades",
+    description: "Submit your FINAL trade decisions. Call exactly once when done researching.",
+    input_schema: {
+      type: "object",
+      properties: {
+        sells: {
+          type: "array",
+          items: { type: "string" },
+          description: "Mints of CURRENT positions to sell now (must be from the positions list). [] to hold them all.",
+        },
+        buys: {
+          type: "array",
+          items: { type: "string" },
+          description: "Mints of CANDIDATES to buy now (must be from the candidate menu). [] to buy nothing.",
+        },
+        reasoning: { type: "string" },
+        confidence: { type: "number", description: "0..1" },
+      },
+      required: ["sells", "buys", "reasoning", "confidence"],
+    },
+  },
+] as const;
+
+function tradePrompt(
+  cfg: AgentConfig,
+  positions: TradePosition[],
+  candidates: TradeCandidate[],
+  roomForBuys: number,
+): string {
+  const fmtSol = (l: bigint) => (Number(l) / 1e9).toFixed(4);
+  const posList = positions.length
+    ? positions
+        .map(
+          (p) =>
+            `- ${p.symbol}  ${p.mint}  value ${fmtSol(p.valueLamports)} SOL` +
+            (p.pnlPct != null ? `  PnL ${p.pnlPct >= 0 ? "+" : ""}${p.pnlPct.toFixed(1)}%` : "  (cost basis unknown)") +
+            (p.ageMin != null ? `  age ${p.ageMin}m` : ""),
+        )
+        .join("\n")
+    : "  (no open positions)";
+  const candList = candidates.length
+    ? candidates.map((c) => `- ${c.symbol}  ${c.mint}  [${c.category}]`).join("\n")
+    : "  (no candidates this cycle)";
+  return [
+    "You manage a SMALL SPOT memecoin trade book. Decide which CURRENT positions to SELL",
+    "(take profit, cut a loser, or exit a broken thesis) and which CANDIDATES to BUY.",
+    "Doing nothing (sells:[], buys:[]) is always allowed and frequently correct.",
+    "",
+    "CURRENT POSITIONS (already marked to market):",
+    posList,
+    "",
+    "BUY CANDIDATES — you may ONLY buy a mint from this list:",
+    candList,
+    "",
+    "Rules:",
+    `- A mechanical stop-loss (-${cfg.tradeStopLossPct}%) and take-profit (+${cfg.tradeTakeProfitPct}%) ALREADY run before you,`,
+    "  so focus on thesis: is momentum/liquidity deteriorating (sell), or is a candidate genuinely worth a fresh entry?",
+    `- Room for at most ${roomForBuys} NEW position(s) this cycle (book cap ${cfg.maxPositions}). Buying 0 is fine.`,
+    `- Each buy deploys ~${fmtSol(cfg.tradePositionLamports)} SOL. Max acceptable risk score: ${cfg.maxTokenRisk} (lower=safer).`,
+    "- Memecoins are brutal and most go to zero. Be selective; thin liquidity = no clean exit. When unsure, don't buy.",
+    cfg.dryRun ? "- DRY RUN: nothing moves; risk scores are heuristic stubs. Still make realistic calls to validate the loop." : "",
+    "",
+    "Research candidates with assess_token_risk (check market_data liquidity/volume), then call submit_trades exactly once.",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+/**
+ * Ask Claude to manage the book. The model can ONLY sell mints it already holds
+ * and buy mints from the candidate menu; the trade engine enforces sizing,
+ * solvency, the position cap, and the risk gate regardless of what it returns.
+ */
+export async function decideTradesWithClaude(
+  agent: MagpieAgent,
+  cfg: AgentConfig,
+  positions: TradePosition[],
+  candidates: TradeCandidate[],
+  roomForBuys: number,
+): Promise<TradeDecision> {
+  const empty: TradeDecision = { sells: [], buys: [], reasoning: "nothing to do", confidence: 1 };
+  if (!positions.length && !candidates.length) return empty;
+
+  const { default: Anthropic } = await import("@anthropic-ai/sdk");
+  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  const posMints = new Set(positions.map((p) => p.mint));
+  const candMints = new Set(candidates.map((c) => c.mint));
+
+  const messages: Array<{ role: "user" | "assistant"; content: unknown }> = [
+    { role: "user", content: tradePrompt(cfg, positions, candidates, roomForBuys) },
+  ];
+
+  for (let step = 0; step < MAX_TOOL_CALLS; step++) {
+    const resp = await client.messages.create({
+      model: MODEL,
+      max_tokens: 1024,
+      system:
+        SYSTEM_PROMPT +
+        "\n\n── CONTEXT SHIFT — READ CAREFULLY ──\n" +
+        "You are now the trading brain for a SPOT memecoin book. This is NOT borrowing: the wallet trades its OWN SOL, there is NO loan, NO repay, and NO never-default concern in this task. The lending facts above are background about the protocol only — do NOT apply 'hold SOL idle as repay reserve' here. Deploying capital into genuinely good setups is the JOB; sitting 100% in SOL forever is a failure mode too. " +
+        "You only SELECT what to buy/sell; the surrounding code enforces position sizing, solvency, the position cap, slippage, and a mechanical stop-loss/take-profit. Be selective (most memecoins go to zero; thin liquidity = no clean exit), but when a candidate is genuinely worth the risk within the rails, BUY it.",
+      tools: TRADE_TOOLS as never,
+      messages: messages as never,
+    });
+
+    const toolResults: Array<{ type: "tool_result"; tool_use_id: string; content: string }> = [];
+    for (const block of resp.content as unknown as Array<Record<string, unknown>>) {
+      if (block.type !== "tool_use") continue;
+      if (block.name === "submit_trades") {
+        const d = block.input as Partial<TradeDecision>;
+        const sells = (Array.isArray(d.sells) ? d.sells : []).map(String).filter((m) => posMints.has(m));
+        const buys = (Array.isArray(d.buys) ? d.buys : []).map(String).filter((m) => candMints.has(m));
+        return {
+          sells,
+          buys,
+          reasoning: String(d.reasoning ?? "(none)"),
+          confidence: Math.max(0, Math.min(1, Number(d.confidence ?? 0))),
+        };
+      }
+      // assess_token_risk only (no pool state needed for spot trading).
+      const out =
+        block.name === "assess_token_risk"
+          ? await runTool(agent, cfg, candidates.map((c) => ({ ...c, decimals: 0 })), "assess_token_risk", (block.input ?? {}) as Record<string, unknown>)
+          : { error: `unknown tool ${String(block.name)}` };
+      toolResults.push({ type: "tool_result", tool_use_id: String(block.id), content: JSON.stringify(out) });
+    }
+
+    messages.push({ role: "assistant", content: resp.content });
+    if (toolResults.length === 0) {
+      messages.push({ role: "user", content: "Call submit_trades now (sells:[] buys:[] is a valid 'do nothing')." });
+    } else {
+      messages.push({ role: "user", content: toolResults });
+    }
+  }
+  return { ...empty, reasoning: "tool-call budget exhausted — doing nothing for safety", confidence: 0 };
 }
