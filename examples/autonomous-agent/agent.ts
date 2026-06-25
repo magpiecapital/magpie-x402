@@ -78,6 +78,27 @@ async function main() {
   const doesTrade = cfg.strategy === "trade" || cfg.strategy === "both";
   const doesBorrow = cfg.strategy === "borrow" || cfg.strategy === "both";
 
+  // GO-LIVE GUARD — a fresh-buy borrow can NEVER clear the min-collateral floor
+  // when the floor >= the buy cap, and with held collateral disabled that is the
+  // only borrow path, so the loop would silently never open a loan. Warn LOUDLY
+  // at boot (log + DM) so the misconfig is visible. We do NOT exit: the guardian
+  // must keep running to repay any existing on-chain loans (never-default > a
+  // borrow-config gripe). Trade + guardian continue normally.
+  if (
+    doesBorrow &&
+    cfg.maxBuyLamports > 0n &&
+    cfg.minCollateralLamports >= cfg.maxBuyLamports &&
+    !cfg.useExistingHoldings
+  ) {
+    const warn =
+      `⚠️ BORROW CONFIG DEADLOCK — MIN_COLLATERAL_SOL (${fmt(cfg.minCollateralLamports)}) >= MAX_BUY_SOL ` +
+      `(${fmt(cfg.maxBuyLamports)}) with USE_EXISTING_HOLDINGS=false: every fresh-buy borrow will be skipped by ` +
+      `the min-collateral gate and the agent will NEVER open a loan. Lower MIN_COLLATERAL_SOL below MAX_BUY_SOL ` +
+      `(minus slippage) or raise MAX_BUY_SOL. (Trade + guardian keep running.)`;
+    log(warn);
+    await notifier.send("error", warn);
+  }
+
   await notifier.send(
     "boot",
     `Online · ${keypair.publicKey.toBase58().slice(0, 8)}… · strategy=${cfg.strategy}` +
@@ -134,6 +155,7 @@ async function runCycle(agent: MagpieAgent, guardian: LoanGuardian, notifier: No
 
   // 2) ACQUIRE collateral — collateralize what we ALREADY hold (no buy), else buy it.
   let collateralAmount: string;
+  const isHeld = !!candidate.existingAmount;
   if (candidate.existingAmount) {
     collateralAmount = candidate.existingAmount;
     log(`HELD — collateralizing existing ${candidate.symbol} (${collateralAmount} base units) — no buy, no slippage.`);
@@ -170,10 +192,12 @@ async function runCycle(agent: MagpieAgent, guardian: LoanGuardian, notifier: No
   // 2b) MIN-COLLATERAL GATE — never pay the build-borrow x402 fee on collateral
   //     too small to clear a real loan (e.g. dust the wallet already holds). The
   //     held-collateral path does NOT go through the MAX_BUY_SOL sizing, so this
-  //     is the only floor protecting it. Value the collateral in SOL via Jupiter;
-  //     skip below the floor. A null quote (transient / no route) is NOT treated
-  //     as below-floor — skipping a borrow is always safe, but we don't want a
-  //     Jupiter blip to silently block borrowing, so null proceeds.
+  //     is the only floor protecting it. Value the collateral in SOL via Jupiter.
+  //     null handling differs by path: on the BUY path a null is a transient blip
+  //     (we just bought it on Jupiter, so a route exists) → proceed, so a Jupiter
+  //     hiccup can't silently block borrowing. On the HELD path a null means the
+  //     token has no route / is illiquid — exactly the dust we must NOT pay a fee
+  //     to collateralize → skip.
   if (cfg.minCollateralLamports > 0n) {
     const takerPk = agent.publicKey();
     const valueLamports = takerPk
@@ -183,11 +207,14 @@ async function runCycle(agent: MagpieAgent, guardian: LoanGuardian, notifier: No
           taker: takerPk.toBase58(),
         })
       : null;
-    if (valueLamports !== null && valueLamports < cfg.minCollateralLamports) {
+    const belowFloor = valueLamports !== null && valueLamports < cfg.minCollateralLamports;
+    const unpriceableHeld = valueLamports === null && isHeld;
+    if (belowFloor || unpriceableHeld) {
+      const worth = valueLamports !== null ? `~${fmt(valueLamports)} SOL` : "unpriceable (no Jupiter route)";
       await notifier.send(
         "hold",
-        `Skipping ${candidate.symbol}: collateral worth ~${fmt(valueLamports)} SOL is below the ` +
-          `${fmt(cfg.minCollateralLamports)} SOL minimum — not paying a build-borrow fee on a too-small loan.`,
+        `Skipping ${candidate.symbol}: collateral ${worth} is below the ${fmt(cfg.minCollateralLamports)} SOL ` +
+          `minimum — not paying a build-borrow fee on a too-small / illiquid loan.`,
       );
       return;
     }

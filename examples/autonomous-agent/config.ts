@@ -139,7 +139,11 @@ export function loadConfig(): AgentConfig {
 
     maxOpenLoans: num(process.env.MAX_OPEN_LOANS, 1),
     maxBuyLamports: BigInt(Math.round(num(process.env.MAX_BUY_SOL, 0) * 1e9)),
-    minCollateralLamports: BigInt(Math.round(num(process.env.MIN_COLLATERAL_SOL, 3.0) * 1e9)),
+    // Default 1.0 SOL: blocks dust (sub-0.25-SOL leftovers) while staying below a
+    // typical MAX_BUY_SOL (e.g. 2) so a fresh max-size buy clears the floor with
+    // slippage headroom. MUST be < MAX_BUY_SOL (minus slippage) or the buy path
+    // can never borrow — the boot guard in agent.ts warns if that's violated.
+    minCollateralLamports: BigInt(Math.round(num(process.env.MIN_COLLATERAL_SOL, 1.0) * 1e9)),
     repayLeadFraction: num(process.env.REPAY_LEAD_FRACTION, 0.5),
     repayLeadSecondsMin: num(process.env.REPAY_LEAD_SECONDS_MIN, 6 * 3600), // >= 6h before due
 
