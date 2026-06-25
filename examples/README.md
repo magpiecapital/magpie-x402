@@ -67,9 +67,9 @@ npx tsx examples/01-fetch-credit-score.ts <WALLET_PUBKEY>
 
 ## Going further
 
-- **Integrate as an SDK** — copy `lib/x402-client.ts` into your project. No npm package yet on purpose; this stays a single file you fully understand.
-- **Webhook subscriptions** — coming in v0.2. Eliminates polling for intent + loan events.
+- **Integrate as an SDK** — `npm install @magpieloans/magpie-agent` for the full typed client: every action as a one-liner, signs locally, zero custody. Prefer a single file you fully understand? Copy `lib/x402-client.ts` into your project instead.
+- **Webhook subscriptions** — shipped. See [`09-webhook-receiver.ts`](./09-webhook-receiver.ts) and `sdk/src/webhooks.ts` (HMAC-verified intent + loan events; eliminates polling).
 - **LP-side endpoints** — shipped. See [`06-yield-agent.ts`](./06-yield-agent.ts) and `/api/v1/agent/build-deposit` / `/build-withdraw` / `/lp-state`.
-- **MCP server** — coming in v0.3. Drop-in tools for Claude, ChatGPT, Cursor, and any MCP-aware agent host.
+- **MCP server** — shipped. `npx @magpieloans/magpie-mcp` exposes all 26 tools to Claude, ChatGPT, Cursor, Windsurf, and any MCP-aware host. See [`mcp/README.md`](../mcp/README.md).
 
 Open an issue on [magpie-x402](https://github.com/magpiecapital/magpie-x402/issues) to vote on what ships next.

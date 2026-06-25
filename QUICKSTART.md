@@ -21,7 +21,7 @@ This guide is for code-first builders. If you'd rather your agent host (Claude D
 
 ```bash
 mkdir my-magpie-agent && cd my-magpie-agent
-npm init -y
+npm init -y && npm pkg set type=module   # ESM — the SDK and the snippet below use `import` + top-level await
 npm install @magpieloans/magpie-agent @solana/web3.js
 ```
 
@@ -105,7 +105,7 @@ console.log("  tx:          https://solscan.io/tx/" + loan.signature);
 ## Step 5 — Run it (2 minutes)
 
 ```bash
-node --experimental-vm-modules agent.js
+node agent.js
 ```
 
 You should see something like:
@@ -258,8 +258,8 @@ Every paid call to x402 is recorded (anonymously, no per-payer detail) and surfa
 ## What's next
 
 - **Premium Tier** (in build, 4–6 weeks): tokenized US equities (NVDAx, COINx, TSLAx, AAPLx, MSFTx) + blue-chip Solana memecoins ($PUMP, $BONK, $FARTCOIN, $TROLL) accepted as collateral. The SDK already supports any new tier; just change the `tier` argument when it ships.
-- **More examples**: 10 turn-key agent files in `examples/` — fork freely.
-- **MCP host integration**: drop the [MCP server](./mcp/README.md) into your Claude / Cursor / Windsurf / ChatGPT desktop config and the same 19 actions become first-class tool calls.
+- **More examples**: 13 turn-key agent files in `examples/` — fork freely.
+- **MCP host integration**: drop the [MCP server](./mcp/README.md) into your Claude / Cursor / Windsurf / ChatGPT desktop config and the same 26 actions become first-class tool calls.
 
 ## Help
 

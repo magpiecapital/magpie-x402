@@ -72,11 +72,11 @@ Loan and pool reads are **multi-version**: every loan/pool is resolved across th
 >
 > 📦 **TypeScript SDK** (`@magpieloans/magpie-agent`): every action as a one-liner. Borrow, lend, liquidate, post conditional intents — no HTTP plumbing. See [`sdk/README.md`](./sdk/README.md).
 >
-> 🧩 **MCP server** for Claude Desktop / Cursor / Windsurf / ChatGPT desktop: one config block, 19 tools. See [`mcp/README.md`](./mcp/README.md).
+> 🧩 **MCP server** for Claude Desktop / Cursor / Windsurf / ChatGPT desktop: one config block, 26 tools. See [`mcp/README.md`](./mcp/README.md).
 >
 > 🎯 **Limit-close agent quickstart** — full end-to-end walkthrough for agents that arm, monitor, and steer limit-close (TP/SL) orders on borrowers' loans. Authorization flow, every endpoint, sample code, error reference, best practices. See [`docs/AGENT_QUICKSTART_LIMIT_CLOSE.md`](./docs/AGENT_QUICKSTART_LIMIT_CLOSE.md).
 >
-> 👉 **Just want code examples?** [`/examples/`](./examples/) — 10 turn-key TypeScript agents (credit fetch, liquidation keeper, full borrow loop, conditional intent, yield agent, webhook receiver, collateral screener, equity-leverage preview, more) that talk to the live production endpoint. Each is a single file, runs with `npx tsx`.
+> 👉 **Just want code examples?** [`/examples/`](./examples/) — 13 turn-key TypeScript agents (credit fetch, liquidation keeper, full borrow loop, conditional intent, yield agent, webhook receiver, collateral screener, equity-leverage preview, more) that talk to the live production endpoint. Each is a single file, runs with `npx tsx`.
 >
 > 🧩 **Using Claude Desktop, Cursor, Windsurf, or ChatGPT desktop?** [`/mcp/`](./mcp/) ships a one-config-block MCP server that exposes the full API as native tools in your agent host. Free reads work without any keypair; paid endpoints sign x402 payments locally with a configured Solana wallet.
 
