@@ -10,6 +10,32 @@ export interface AgentConfig {
   /** Magpie x402 base URL. */
   baseUrl: string;
 
+  /**
+   * What the agent does each cycle:
+   *   'trade'  — find memecoins, BUY them, and SELL for profit (take-profit / stop-loss /
+   *              brain exit). Spot only, no leverage. The wallet's own SOL is the book.
+   *   'borrow' — buy collateral + borrow against it on Magpie, guardian repays (the demo).
+   *   'both'   — run the trade book AND keep the borrow/guardian path.
+   * Default 'trade'.
+   */
+  strategy: "trade" | "borrow" | "both";
+
+  // ── trade-mode knobs (only used when strategy includes 'trade') ────────────
+  /** SOL to deploy per new memecoin position (lamports). */
+  tradePositionLamports: bigint;
+  /** Never hold more than this many open memecoin positions at once. */
+  maxPositions: number;
+  /** Mechanical take-profit: auto-sell a position up >= this % vs entry (needs a known cost basis). */
+  tradeTakeProfitPct: number;
+  /** Mechanical stop-loss: auto-sell a position down >= this % vs entry. The downside floor. */
+  tradeStopLossPct: number;
+  /** Don't mechanically exit a position younger than this (lets a thesis breathe; ms). */
+  tradeMinHoldMs: number;
+  /** Ignore dust positions worth less than this in SOL (lamports) when valuing/selling. */
+  tradeMinPositionLamports: bigint;
+  /** Max slippage tolerated on a trade swap (bps). */
+  tradeSlippageBps: number;
+
   /** HARD allowlist of mints the agent may buy. Empty in dry-run = "auto-pick one to illustrate". */
   mintAllowlist: string[];
   /**
@@ -83,6 +109,15 @@ export function loadConfig(): AgentConfig {
     rpcUrl: process.env.SOLANA_RPC_URL ?? "https://api.mainnet-beta.solana.com",
     baseUrl: process.env.X402_BASE_URL ?? "https://x402.magpie.capital",
 
+    strategy: (process.env.STRATEGY as AgentConfig["strategy"]) ?? "trade",
+    tradePositionLamports: BigInt(Math.round(num(process.env.TRADE_POSITION_SOL, 0.25) * 1e9)),
+    maxPositions: num(process.env.MAX_POSITIONS, 3),
+    tradeTakeProfitPct: num(process.env.TRADE_TAKE_PROFIT_PCT, 40),
+    tradeStopLossPct: num(process.env.TRADE_STOP_LOSS_PCT, 25),
+    tradeMinHoldMs: num(process.env.TRADE_MIN_HOLD_MIN, 0) * 60_000,
+    tradeMinPositionLamports: BigInt(Math.round(num(process.env.TRADE_MIN_POSITION_SOL, 0.01) * 1e9)),
+    tradeSlippageBps: num(process.env.TRADE_SLIPPAGE_BPS, 150),
+
     mintAllowlist: (process.env.MINT_ALLOWLIST ?? "")
       .split(",")
       .map((s) => s.trim())
@@ -100,7 +135,7 @@ export function loadConfig(): AgentConfig {
     repayLeadFraction: num(process.env.REPAY_LEAD_FRACTION, 0.5),
     repayLeadSecondsMin: num(process.env.REPAY_LEAD_SECONDS_MIN, 6 * 3600), // >= 6h before due
 
-    gasBufferLamports: BigInt(process.env.GAS_BUFFER_LAMPORTS ?? 30_000_000), // 0.03 SOL
+    gasBufferLamports: BigInt(process.env.GAS_BUFFER_LAMPORTS ?? 50_000_000), // 0.05 SOL (swap fees + ATA rent + priority)
     allowRecursiveRedeploy: process.env.ALLOW_RECURSIVE_REDEPLOY === "true",
 
     guardianIntervalMs: num(process.env.GUARDIAN_INTERVAL_MS, 10 * 60_000), // every 10 min

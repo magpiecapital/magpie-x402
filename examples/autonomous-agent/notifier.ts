@@ -11,10 +11,10 @@
  */
 import type { AgentConfig } from "./config.js";
 
-export type NotifyKind = "boot" | "cycle" | "brain" | "buy" | "borrow" | "repay" | "hold" | "info" | "warn" | "error";
+export type NotifyKind = "boot" | "cycle" | "brain" | "buy" | "sell" | "borrow" | "repay" | "hold" | "info" | "warn" | "error";
 
 const ICON: Record<NotifyKind, string> = {
-  boot: "🤖", cycle: "🔄", brain: "🧠", buy: "🛒", borrow: "🏦",
+  boot: "🤖", cycle: "🔄", brain: "🧠", buy: "🛒", sell: "💰", borrow: "🏦",
   repay: "✅", hold: "✋", info: "ℹ️", warn: "⚠️", error: "🚨",
 };
 

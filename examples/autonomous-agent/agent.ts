@@ -26,6 +26,8 @@ import { jupiterBuy } from "./jupiter.js";
 import { brainEnabled, chooseCandidateWithClaude, type MenuItem } from "./brain.js";
 import { getExistingCollateral } from "./holdings.js";
 import { Notifier } from "./notifier.js";
+import { Positions } from "./positions.js";
+import { runTradeCycle } from "./trade.js";
 import { RULES } from "./magpie-playbook.js";
 
 const log = (s = "") => console.log(s);
@@ -64,11 +66,24 @@ async function main() {
   log("");
 
   // ── GUARD FIRST: protect any open loans before we do anything else. ───────
+  // Runs in EVERY strategy (even pure 'trade') as a defensive no-op: if any loan
+  // is ever open on this wallet, never-default still applies. Cheap when there are none.
   const guardian = new LoanGuardian(agent, cfg, keypair, notifier);
   guardian.start();
+
+  // ── trade book state (only used when strategy includes 'trade'). ──────────
+  const conn = new Connection(cfg.rpcUrl, "confirmed");
+  const positions = new Positions();
+  const tradeCtx = { agent, cfg, keypair, notifier, positions, conn };
+  const doesTrade = cfg.strategy === "trade" || cfg.strategy === "both";
+  const doesBorrow = cfg.strategy === "borrow" || cfg.strategy === "both";
+
   await notifier.send(
     "boot",
-    `Online · ${keypair.publicKey.toBase58().slice(0, 8)}… · category=${cfg.preferredCategory} · cycle ${(cfg.cycleIntervalMs / 60000) | 0}m · max ${cfg.maxOpenLoans} loan(s) · re-leverage ${cfg.allowRecursiveRedeploy ? "ON" : "off"} · ${brainEnabled() ? "Claude brain" : "deterministic picker"}.`,
+    `Online · ${keypair.publicKey.toBase58().slice(0, 8)}… · strategy=${cfg.strategy}` +
+      (doesTrade ? ` · ${(Number(cfg.tradePositionLamports) / 1e9).toFixed(2)}◎/pos · max ${cfg.maxPositions} pos · TP+${cfg.tradeTakeProfitPct}%/SL-${cfg.tradeStopLossPct}%` : "") +
+      (doesBorrow ? ` · max ${cfg.maxOpenLoans} loan(s)` : "") +
+      ` · cycle ${(cfg.cycleIntervalMs / 60000) | 0}m · ${brainEnabled() ? "Claude brain" : "deterministic picker"}.`,
   );
 
   // ── the continuous loop: research → maybe act → sleep → repeat ────────────
@@ -77,7 +92,8 @@ async function main() {
     cycleNum++;
     try {
       await notifier.send("cycle", `Cycle ${cycleNum} — researching…`);
-      await runCycle(agent, guardian, notifier);
+      if (doesTrade) await runTradeCycle(tradeCtx);
+      if (doesBorrow) await runCycle(agent, guardian, notifier);
     } catch (err) {
       await notifier.send("error", `Cycle ${cycleNum} errored (loop continues): ${(err as Error).message}`);
     }
