@@ -92,6 +92,15 @@ export class LoanGuardian {
   private timer: ReturnType<typeof setInterval> | null = null;
   /** loanId -> normalized loan we are responsible for. */
   private tracked = new Map<string, NLoan>();
+  /**
+   * loanIds with a repay loop currently in flight. The watcher runs on a
+   * setInterval, and repayForever is an unbounded retry loop — without this
+   * guard a single stuck repay would let each subsequent tick spawn ANOTHER
+   * concurrent repay loop for the same loan, each paying the 0.002-SOL
+   * build-repay x402 fee and broadcasting a duplicate repay tx. The guard
+   * makes repay strictly one-loop-per-loan so a stuck loan bleeds nothing.
+   */
+  private repaying = new Set<string>();
 
   constructor(
     private readonly agent: MagpieAgent,
@@ -205,7 +214,10 @@ export class LoanGuardian {
           log(`DRY RUN — loan ${loan.loanId} is inside its repay window; would repay now (due in ${(loan.dueUnix - now) / 3600 | 0}h).`);
           continue;
         }
-        await this.repayForever(loan);
+        // Fire-and-forget: repayForever is an unbounded retry loop and is
+        // self-guarded against re-entry (this.repaying), so dispatching without
+        // await means one stuck loan never blocks another loan's deadline check.
+        void this.repayForever(loan);
       }
     }
   }
@@ -216,6 +228,19 @@ export class LoanGuardian {
       crit(`loan ${loan.loanId} has no loanPda — cannot repay. Skipping (will re-evaluate next tick).`);
       return;
     }
+    // Re-entrancy guard — at most one repay loop per loan, ever. A second caller
+    // (the next interval tick, or the under-reserved path) returns immediately
+    // instead of double-paying the build-repay fee / double-broadcasting.
+    if (this.repaying.has(loan.loanId)) return;
+    this.repaying.add(loan.loanId);
+    try {
+      await this.repayLoop(loan);
+    } finally {
+      this.repaying.delete(loan.loanId);
+    }
+  }
+
+  private async repayLoop(loan: NLoan): Promise<void> {
     for (let attempt = 1; ; attempt++) {
       const still = await this.findActiveLoan(loan.loanId).catch(() => undefined);
       if (still === undefined && attempt > 1) {

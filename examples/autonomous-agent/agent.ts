@@ -74,7 +74,7 @@ async function main() {
   // ── trade book state (only used when strategy includes 'trade'). ──────────
   const conn = new Connection(cfg.rpcUrl, "confirmed");
   const positions = new Positions();
-  const tradeCtx = { agent, cfg, keypair, notifier, positions, conn };
+  const tradeCtx = { agent, cfg, keypair, notifier, positions, conn, guardian };
   const doesTrade = cfg.strategy === "trade" || cfg.strategy === "both";
   const doesBorrow = cfg.strategy === "borrow" || cfg.strategy === "both";
 

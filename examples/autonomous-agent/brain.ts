@@ -105,9 +105,29 @@ async function runTool(
   }
 }
 
+/**
+ * SECURITY — token symbols/names are attacker-authored free text that flows into
+ * the Claude prompt. Strip newlines and control chars, drop characters used to
+ * fake prompt structure, and truncate, so a token named e.g. "ignore all prior
+ * instructions" can't break out of its line. The model output is independently
+ * constrained to on-allowlist mints with a code-fixed buy size, so this is
+ * defense-in-depth, not the only guard.
+ */
+function safeSym(s: string | undefined): string {
+  if (!s) return "?";
+  return (
+    s
+      .replace(/[\x00-\x1f\x7f-\x9f]/g, " ") // control chars + newlines
+      .replace(/[`{}[\]<>|]/g, "") // chars used to fake code/role framing
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 32) || "?"
+  );
+}
+
 function taskPrompt(cfg: AgentConfig, menu: MenuItem[]): string {
   const list = menu
-    .map((m) => `- ${m.symbol}  ${m.mint}  [${m.category}]${m.held ? "  (ALREADY HELD — collateralize directly, no buy needed)" : ""}`)
+    .map((m) => `- ${safeSym(m.symbol)}  ${m.mint}  [${m.category}]${m.held ? "  (ALREADY HELD — collateralize directly, no buy needed)" : ""}`)
     .join("\n");
   return [
     "Choose ONE collateral asset to collateralize (buy first if not already held), or decide to HOLD.",
@@ -259,14 +279,14 @@ function tradePrompt(
     ? positions
         .map(
           (p) =>
-            `- ${p.symbol}  ${p.mint}  value ${fmtSol(p.valueLamports)} SOL` +
+            `- ${safeSym(p.symbol)}  ${p.mint}  value ${fmtSol(p.valueLamports)} SOL` +
             (p.pnlPct != null ? `  PnL ${p.pnlPct >= 0 ? "+" : ""}${p.pnlPct.toFixed(1)}%` : "  (cost basis unknown)") +
             (p.ageMin != null ? `  age ${p.ageMin}m` : ""),
         )
         .join("\n")
     : "  (no open positions)";
   const candList = candidates.length
-    ? candidates.map((c) => `- ${c.symbol}  ${c.mint}  [${c.category}]`).join("\n")
+    ? candidates.map((c) => `- ${safeSym(c.symbol)}  ${c.mint}  [${c.category}]`).join("\n")
     : "  (no candidates this cycle)";
   return [
     "You manage a SMALL SPOT memecoin trade book. Decide which CURRENT positions to SELL",

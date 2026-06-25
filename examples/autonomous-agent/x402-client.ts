@@ -88,6 +88,28 @@ export async function paidCall<T = unknown>(
   }
   const amount = BigInt(amountStr);
 
+  // ── SECURITY GATE — payTo + amount are from the (untrusted) 402 response ──
+  // Our key never leaves this process, but a compromised/spoofed/MITM'd endpoint
+  // could demand a wallet-draining transfer to an attacker wallet. Cap the amount
+  // (worst case = one capped fee, not the wallet) and optionally pin the recipient.
+  // x402 endpoints cost <= 0.01 SOL, so 0.02 SOL is generous headroom.
+  const maxPaymentLamports = BigInt(process.env.X402_MAX_PAYMENT_LAMPORTS ?? "20000000");
+  if (amount > maxPaymentLamports) {
+    throw new Error(
+      `x402 ${path}: 402 demanded ${amount.toString()} lamports, above the ${maxPaymentLamports.toString()}-lamport safety cap — refusing (possible spoofed/MITM 402). ` +
+        `Set X402_MAX_PAYMENT_LAMPORTS only if you trust this endpoint.`,
+    );
+  }
+  const allowedRecipients = (process.env.X402_ALLOWED_RECIPIENTS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (allowedRecipients.length > 0 && !allowedRecipients.includes(payTo)) {
+    throw new Error(
+      `x402 ${path}: 402 recipient ${payTo} not in X402_ALLOWED_RECIPIENTS — refusing (possible spoofed/MITM 402).`,
+    );
+  }
+
   const connection = new Connection(opts.rpcUrl, "confirmed");
   const tx = new Transaction();
   tx.add(

@@ -56,6 +56,24 @@ export interface X402Context {
   signer?: MagpieSigner;
   /** Override the default fetch (handy for tests). */
   fetcher?: typeof fetch;
+  /**
+   * SECURITY — hard ceiling (lamports) on any single x402 payment. The payTo and
+   * amount in a 402 response are server-supplied and therefore untrusted: a
+   * compromised or MITM'd endpoint could demand a wallet-draining transfer to an
+   * attacker address. A 402 demanding more than this cap is refused, never signed.
+   * Defaults to the X402_MAX_PAYMENT_LAMPORTS env, else 20_000_000 (0.02 SOL) —
+   * comfortably above the dearest real endpoint (0.01 SOL) and far below any
+   * amount worth draining. Raise only for endpoints you explicitly trust.
+   */
+  maxPaymentLamports?: bigint;
+  /**
+   * SECURITY — optional allowlist of acceptable payment recipients (base58). When
+   * non-empty, a 402 whose recipient is not on the list is refused. Defaults to
+   * the X402_ALLOWED_RECIPIENTS env (comma-separated). Empty ⇒ recipient is not
+   * pinned and only the amount cap applies. Pin this to the known Magpie fee
+   * wallet (server MAGPIE_PAY_TO) to fully neutralize recipient spoofing.
+   */
+  allowedRecipients?: string[];
 }
 
 export async function paidCall<T = unknown>(
@@ -108,6 +126,35 @@ export async function paidCall<T = unknown>(
     );
   }
   const amount = BigInt(amountStr);
+
+  // ── SECURITY GATE — payTo + amount come from the (untrusted) 402 response ──
+  // The signer's key never leaves this process, but a compromised / spoofed /
+  // MITM'd endpoint could still demand a large transfer to an attacker wallet.
+  // Cap the amount and (optionally) pin the recipient so a hostile 402 can move
+  // at most one capped fee, never the wallet.
+  const maxPaymentLamports =
+    ctx.maxPaymentLamports ?? BigInt(process.env.X402_MAX_PAYMENT_LAMPORTS ?? "20000000");
+  if (amount > maxPaymentLamports) {
+    throw new X402Error(
+      `${path}: 402 demanded ${amount.toString()} lamports, above the ${maxPaymentLamports.toString()}-lamport safety cap — refusing to pay (possible spoofed/MITM 402). ` +
+        `Raise maxPaymentLamports / X402_MAX_PAYMENT_LAMPORTS only if you trust this endpoint.`,
+      402,
+      null,
+    );
+  }
+  const allowedRecipients =
+    ctx.allowedRecipients ??
+    (process.env.X402_ALLOWED_RECIPIENTS ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  if (allowedRecipients.length > 0 && !allowedRecipients.includes(payTo)) {
+    throw new X402Error(
+      `${path}: 402 recipient ${payTo} is not in the allowlist — refusing to pay (possible spoofed/MITM 402).`,
+      402,
+      null,
+    );
+  }
 
   // Pay on Solana.
   const connection = new Connection(ctx.rpcUrl, "confirmed");
