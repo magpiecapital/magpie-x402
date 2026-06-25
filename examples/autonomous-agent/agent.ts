@@ -79,22 +79,27 @@ async function main() {
   const doesBorrow = cfg.strategy === "borrow" || cfg.strategy === "both";
 
   // GO-LIVE GUARD — a fresh-buy borrow can NEVER clear the min-collateral floor
-  // when the floor >= the buy cap, and with held collateral disabled that is the
-  // only borrow path, so the loop would silently never open a loan. Warn LOUDLY
-  // at boot (log + DM) so the misconfig is visible. We do NOT exit: the guardian
-  // must keep running to repay any existing on-chain loans (never-default > a
-  // borrow-config gripe). Trade + guardian continue normally.
+  // when the floor is within a round-trip slippage of the buy cap, and with held
+  // collateral disabled that is the only borrow path, so the loop would silently
+  // never open a loan. We fire across the WHOLE unborrowable band: the bought
+  // collateral is valued back through Jupiter, so it loses ~2× the one-way
+  // slippage vs the SOL spent — a floor as low as maxBuy/(1+2·slip) still never
+  // clears. Warn LOUDLY at boot (log + DM) so the misconfig is visible. We do NOT
+  // exit: the guardian must keep running to repay any existing on-chain loans
+  // (never-default > a borrow-config gripe). Trade + guardian continue normally.
+  const floorWithRoundTripSlippage =
+    (cfg.minCollateralLamports * (10000n + 2n * BigInt(cfg.tradeSlippageBps))) / 10000n;
   if (
     doesBorrow &&
     cfg.maxBuyLamports > 0n &&
-    cfg.minCollateralLamports >= cfg.maxBuyLamports &&
+    floorWithRoundTripSlippage >= cfg.maxBuyLamports &&
     !cfg.useExistingHoldings
   ) {
     const warn =
-      `⚠️ BORROW CONFIG DEADLOCK — MIN_COLLATERAL_SOL (${fmt(cfg.minCollateralLamports)}) >= MAX_BUY_SOL ` +
-      `(${fmt(cfg.maxBuyLamports)}) with USE_EXISTING_HOLDINGS=false: every fresh-buy borrow will be skipped by ` +
-      `the min-collateral gate and the agent will NEVER open a loan. Lower MIN_COLLATERAL_SOL below MAX_BUY_SOL ` +
-      `(minus slippage) or raise MAX_BUY_SOL. (Trade + guardian keep running.)`;
+      `⚠️ BORROW CONFIG DEADLOCK — MIN_COLLATERAL_SOL (${fmt(cfg.minCollateralLamports)}) is within round-trip ` +
+      `slippage of MAX_BUY_SOL (${fmt(cfg.maxBuyLamports)}) with USE_EXISTING_HOLDINGS=false: a fresh buy, valued ` +
+      `back through Jupiter, lands below the floor, so every borrow is skipped and the agent will NEVER open a ` +
+      `loan. Lower MIN_COLLATERAL_SOL well below MAX_BUY_SOL or raise MAX_BUY_SOL. (Trade + guardian keep running.)`;
     log(warn);
     await notifier.send("error", warn);
   }
