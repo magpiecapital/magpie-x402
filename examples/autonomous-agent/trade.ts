@@ -18,6 +18,7 @@ import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import type { MagpieAgent } from "@magpieloans/magpie-agent";
 import type { AgentConfig } from "./config.js";
 import type { Notifier } from "./notifier.js";
+import type { LoanGuardian } from "./loan-guardian.js";
 import { Positions } from "./positions.js";
 import { getAllTokenHoldings } from "./holdings.js";
 import { jupiterBuy, jupiterSell, jupiterValueInSol } from "./jupiter.js";
@@ -48,6 +49,13 @@ export interface TradeCtx {
   notifier: Notifier;
   positions: Positions;
   conn: Connection;
+  /**
+   * The never-default guardian. The trade engine sizes its buys off
+   * guardian.deployableLamports() (liquid − gas − every open loan's repay
+   * reserve), NOT just balance − gas — so in 'both' mode the trade book can
+   * NEVER spend SOL the guardian needs to repay a loan. Never-default holds.
+   */
+  guardian: LoanGuardian;
 }
 
 interface Marked {
@@ -276,11 +284,18 @@ async function executeSell(ctx: TradeCtx, m: Marked, why: string): Promise<boole
   return true;
 }
 
-/** SOL free to deploy into a new buy: balance minus the gas/rent buffer. */
+/**
+ * SOL free to deploy into a new buy. Delegates to the guardian's
+ * deployableLamports(): liquid balance MINUS the gas/rent buffer MINUS every
+ * open loan's repay reserve. This is what keeps 'both' mode never-default —
+ * the trade book can only ever spend SOL that is NOT earmarked to repay a loan,
+ * so collateralized borrowing and active trading coexist without the trade
+ * leg ever cannibalizing a repayment. The guardian is the single owner of the
+ * reserve math; the trade engine never recomputes it independently.
+ */
 async function freeLamports(ctx: TradeCtx): Promise<bigint> {
-  const bal = BigInt(await ctx.conn.getBalance(ctx.keypair.publicKey, "confirmed"));
-  const free = bal - ctx.cfg.gasBufferLamports;
-  return free > 0n ? free : 0n;
+  const deployable = await ctx.guardian.deployableLamports();
+  return deployable > 0n ? deployable : 0n;
 }
 
 /** Re-exported for callers that already have a PublicKey. */
