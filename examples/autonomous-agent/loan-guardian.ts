@@ -37,6 +37,10 @@ const nowUnix = () => Math.floor(Date.now() / 1000);
 // Fallback reserve margin when the exact repay amount isn't present (it normally is).
 const RESERVE_MARGIN_NUM = 115n;
 const RESERVE_MARGIN_DEN = 100n;
+// Per-loan repay OVERHEAD held back on top of each loan's gross repay: the x402
+// build-repay payment (POST /api/v1/agent/build-repay = 0.002 SOL). Reserved once
+// per open loan so N concurrent repays are all funded, not just one.
+const X402_BUILD_REPAY_FEE_LAMPORTS = 2_000_000n;
 const TIER_TERM_SECONDS: Record<TierName, number> = {
   express: 2 * 86400,
   quick: 3 * 86400,
@@ -130,7 +134,13 @@ export class LoanGuardian {
   }
 
   reservedLamports(): bigint {
-    let r = this.cfg.gasBufferLamports;
+    // Base liquidity floor (gas/rent/priority) scales with the number of open
+    // loans so N concurrent repay txs are each funded — a flat buffer would
+    // under-reserve once MAX_OPEN_LOANS > 1. Plus the x402 build-repay fee per
+    // loan, plus every loan's exact gross repay. At N=0 this is one gasBuffer;
+    // at N=1 it adds a single 0.002-SOL repay fee (strictly safer than before).
+    const n = BigInt(Math.max(1, this.tracked.size));
+    let r = this.cfg.gasBufferLamports * n + BigInt(this.tracked.size) * X402_BUILD_REPAY_FEE_LAMPORTS;
     for (const l of this.tracked.values()) r += this.repayReserveFor(l);
     return r;
   }
@@ -163,8 +173,27 @@ export class LoanGuardian {
 
     const loan = await this.findActiveLoan(res.loanId);
     if (!loan) {
-      crit(`borrow ${res.loanId} confirmed but not found on read-back yet. Forcing a sync sweep — it will be adopted + protected.`);
-      await this.tick(); // self-heal: the sync adopts it
+      crit(`borrow ${res.loanId} confirmed but not found on read-back yet. Registering a conservative placeholder so it is reserved + counted even if the sync lags, then forcing a sync sweep.`);
+      // PLACEHOLDER — borrow() returned a loanId, so a loan EXISTS on-chain, but the
+      // read-back hasn't surfaced it. Track it NOW with a conservative reserve
+      // (repayReserveFor falls back to borrowed × margin since repayLamports is
+      // unknown) so (a) deployableLamports immediately holds back the repay reserve
+      // and (b) tracked.size counts it — blocking a second borrow past maxOpenLoans —
+      // even if findActiveLoan AND the self-heal tick BOTH lag. tick() later adopts
+      // the real loan under the same loanId (Map.set overwrites — no double-count),
+      // filling in loanPda/dueUnix so repayForever can act; until then the empty
+      // loanPda keeps the placeholder reserved-but-not-(yet)-repaid.
+      this.track({
+        loanId: res.loanId,
+        loanPda: "",
+        collateralMint: opts.collateralMint,
+        repayLamports: 0n,
+        borrowedLamports: BigInt(res.borrowedLamports ?? 0),
+        dueUnix: 0,
+        startUnix: nowUnix(),
+        status: "active",
+      });
+      await this.tick(); // self-heal: the sync adopts the real loan, overwriting the placeholder
       return null;
     }
     this.track(loan);
