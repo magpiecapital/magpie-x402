@@ -92,8 +92,14 @@ async function main() {
     cycleNum++;
     try {
       await notifier.send("cycle", `Cycle ${cycleNum} — researching…`);
-      if (doesTrade) await runTradeCycle(tradeCtx);
+      // BORROW BEFORE TRADE — never-default ordering. The borrow cycle may open a
+      // new loan; its repay reserve only exists once guardian.safeBorrow() tracks
+      // it. Running borrow first means the subsequent trade cycle sizes its buys
+      // off a guardian.deployableLamports() that ALREADY subtracts the new loan's
+      // reserve — closing the same-cycle race where the trade book could otherwise
+      // spend SOL the not-yet-tracked loan needs to repay. (Audit 2026-06-25.)
       if (doesBorrow) await runCycle(agent, guardian, notifier);
+      if (doesTrade) await runTradeCycle(tradeCtx);
     } catch (err) {
       await notifier.send("error", `Cycle ${cycleNum} errored (loop continues): ${(err as Error).message}`);
     }
