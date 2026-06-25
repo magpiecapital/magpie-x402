@@ -37,6 +37,10 @@ const nowUnix = () => Math.floor(Date.now() / 1000);
 // Fallback reserve margin when the exact repay amount isn't present (it normally is).
 const RESERVE_MARGIN_NUM = 115n;
 const RESERVE_MARGIN_DEN = 100n;
+// Per-loan repay OVERHEAD held back on top of each loan's gross repay: the x402
+// build-repay payment (POST /api/v1/agent/build-repay = 0.002 SOL). Reserved once
+// per open loan so N concurrent repays are all funded, not just one.
+const X402_BUILD_REPAY_FEE_LAMPORTS = 2_000_000n;
 const TIER_TERM_SECONDS: Record<TierName, number> = {
   express: 2 * 86400,
   quick: 3 * 86400,
@@ -124,7 +128,13 @@ export class LoanGuardian {
   }
 
   reservedLamports(): bigint {
-    let r = this.cfg.gasBufferLamports;
+    // Base liquidity floor (gas/rent/priority) scales with the number of open
+    // loans so N concurrent repay txs are each funded — a flat buffer would
+    // under-reserve once MAX_OPEN_LOANS > 1. Plus the x402 build-repay fee per
+    // loan, plus every loan's exact gross repay. At N=0 this is one gasBuffer;
+    // at N=1 it adds a single 0.002-SOL repay fee (strictly safer than before).
+    const n = BigInt(Math.max(1, this.tracked.size));
+    let r = this.cfg.gasBufferLamports * n + BigInt(this.tracked.size) * X402_BUILD_REPAY_FEE_LAMPORTS;
     for (const l of this.tracked.values()) r += this.repayReserveFor(l);
     return r;
   }
