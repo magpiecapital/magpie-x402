@@ -54,6 +54,7 @@ interface Marked {
   mint: string;
   symbol: string;
   decimals: number;
+  category?: string;
   amount: bigint; // on-chain balance (base units)
   value: bigint | null; // SOL lamports, null = no route (illiquid)
   cost?: bigint; // recorded cost basis (lamports)
@@ -87,9 +88,20 @@ export async function runTradeCycle(ctx: TradeCtx): Promise<void> {
   }
   positions.reconcile(new Set(holdings.map((h) => h.mint)));
 
-  // 2) mark every position to market.
+  // SCOPE THE BOOK to memecoins only. A token belongs to the trade book ONLY if
+  // it's a memecoin (the mandate) OR the agent itself bought it (in the cost-basis
+  // book). RWAs / tokenized stocks (e.g. QQQx) and any unknown token the wallet
+  // merely holds — often leftover collateral from a repaid loan — are the operator's
+  // assets and are NEVER sold here.
+  const tradeable = holdings.filter((h) => h.category === "memecoin" || !!positions.get(h.mint));
+  const skipped = holdings.filter((h) => !(h.category === "memecoin" || !!positions.get(h.mint)));
+  if (skipped.length) {
+    log(`SKIP — leaving ${skipped.length} non-memecoin holding(s) untouched: ${skipped.map((s) => `${s.symbol}${s.category ? "/" + s.category : ""}`).join(", ")}.`);
+  }
+
+  // 2) mark every tradeable position to market.
   const marked: Marked[] = [];
-  for (const h of holdings) {
+  for (const h of tradeable) {
     const amount = BigInt(h.amount);
     const value = await jupiterValueInSol({ inputMint: h.mint, amountBaseUnits: amount, taker });
     const entry = positions.get(h.mint);
@@ -100,6 +112,7 @@ export async function runTradeCycle(ctx: TradeCtx): Promise<void> {
       mint: h.mint,
       symbol: h.symbol,
       decimals: h.decimals,
+      category: h.category,
       amount,
       value,
       cost,
