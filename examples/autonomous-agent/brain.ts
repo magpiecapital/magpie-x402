@@ -71,13 +71,28 @@ const TOOLS = [
 async function runTool(
   agent: MagpieAgent,
   cfg: AgentConfig,
+  menu: MenuItem[],
   name: string,
   input: Record<string, unknown>,
 ): Promise<unknown> {
   try {
     if (name === "assess_token_risk") {
-      if (cfg.dryRun) return { note: "dry-run: risk check skipped (no payment made). Reason from category/liquidity instead." };
-      return await agent.tokenRisk(String(input.mint));
+      const mint = String(input.mint);
+      if (cfg.dryRun) {
+        // No paid risk call in dry-run. Return a CATEGORY HEURISTIC so the brain
+        // can rehearse a full decision end-to-end (RWAs/stocks are materially
+        // safer than memecoins). LIVE replaces this with the real paid oracle.
+        const cat = menu.find((m) => m.mint === mint)?.category ?? "memecoin";
+        const estimate = cat === "memecoin" ? 50 : 25;
+        return {
+          mint,
+          risk_score: estimate,
+          category: cat,
+          estimate: true,
+          note: "DRY-RUN heuristic estimate (no payment made). Treat it as a usable score to rehearse the full borrow flow; in LIVE this is a real paid risk assessment.",
+        };
+      }
+      return await agent.tokenRisk(mint);
     }
     if (name === "get_pool_state") return await agent.poolState();
     return { error: `unknown tool ${name}` };
@@ -98,6 +113,9 @@ function taskPrompt(cfg: AgentConfig, menu: MenuItem[]): string {
     "",
     "Prefer assets marked ALREADY HELD when sensible — they cost no buy + no slippage.",
     "",
+    cfg.dryRun
+      ? "DRY RUN — this is a no-funds REHEARSAL. The risk scores you get back are heuristic estimates; treat them as usable and prefer to make a real PICK (especially an ALREADY HELD asset) so the full borrow flow can be validated. Nothing moves. Only HOLD if every option is genuinely unsuitable."
+      : "",
     "Constraints:",
     `- Preferred category: ${cfg.preferredCategory}. RWAs (stocks) are far safer; memecoins are high-risk.`,
     `- Max acceptable Magpie risk score: ${cfg.maxTokenRisk} (0-100, lower = safer).`,
@@ -148,7 +166,7 @@ export async function chooseCandidateWithClaude(
           confidence: conf,
         };
       }
-      const out = await runTool(agent, cfg, String(block.name), (block.input ?? {}) as Record<string, unknown>);
+      const out = await runTool(agent, cfg, menu, String(block.name), (block.input ?? {}) as Record<string, unknown>);
       toolResults.push({ type: "tool_result", tool_use_id: String(block.id), content: JSON.stringify(out) });
     }
 
