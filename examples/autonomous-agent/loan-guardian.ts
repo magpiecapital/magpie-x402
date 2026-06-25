@@ -167,8 +167,27 @@ export class LoanGuardian {
 
     const loan = await this.findActiveLoan(res.loanId);
     if (!loan) {
-      crit(`borrow ${res.loanId} confirmed but not found on read-back yet. Forcing a sync sweep — it will be adopted + protected.`);
-      await this.tick(); // self-heal: the sync adopts it
+      crit(`borrow ${res.loanId} confirmed but not found on read-back yet. Registering a conservative placeholder so it is reserved + counted even if the sync lags, then forcing a sync sweep.`);
+      // PLACEHOLDER — borrow() returned a loanId, so a loan EXISTS on-chain, but the
+      // read-back hasn't surfaced it. Track it NOW with a conservative reserve
+      // (repayReserveFor falls back to borrowed × margin since repayLamports is
+      // unknown) so (a) deployableLamports immediately holds back the repay reserve
+      // and (b) tracked.size counts it — blocking a second borrow past maxOpenLoans —
+      // even if findActiveLoan AND the self-heal tick BOTH lag. tick() later adopts
+      // the real loan under the same loanId (Map.set overwrites — no double-count),
+      // filling in loanPda/dueUnix so repayForever can act; until then the empty
+      // loanPda keeps the placeholder reserved-but-not-(yet)-repaid.
+      this.track({
+        loanId: res.loanId,
+        loanPda: "",
+        collateralMint: opts.collateralMint,
+        repayLamports: 0n,
+        borrowedLamports: BigInt(res.borrowedLamports ?? 0),
+        dueUnix: 0,
+        startUnix: nowUnix(),
+        status: "active",
+      });
+      await this.tick(); // self-heal: the sync adopts the real loan, overwriting the placeholder
       return null;
     }
     this.track(loan);
