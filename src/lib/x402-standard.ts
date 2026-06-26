@@ -86,7 +86,14 @@ export function standardRailEnabled(): boolean {
 export interface PaymentRequirements {
   scheme: "exact";
   network: string;
-  amount: string; // atomic units, per-asset decimals
+  // x402 v2 spec fields strict indexers (x402scan, the bazaar) + facilitators
+  // key off. Set on every ADVERTISED accept (buildSplAccepts); omitted on the
+  // internal verify/settle reconstructions that don't need them.
+  maxAmountRequired?: string; // mirrors `amount` — the spec's name for the max payable atomic amount
+  resource?: string;          // the URL the payment authorizes
+  description?: string;
+  mimeType?: string;
+  amount: string; // atomic units, per-asset decimals — kept for Magpie's native settle path
   asset: string;  // SPL mint
   payTo: string;  // OWNER wallet (facilitator derives the ATA)
   maxTimeoutSeconds: number;
@@ -199,7 +206,7 @@ export function wsolAtomicForLamports(amountLamports: bigint): string {
 }
 
 // ── Build the SERVER-OWNED accepts for a route ──────────────────────────────
-export async function buildSplAccepts(endpoint: string, amountLamports: bigint, memo: string, feePayer: string): Promise<PaymentRequirements[]> {
+export async function buildSplAccepts(endpoint: string, amountLamports: bigint, memo: string, feePayer: string, resource: string, description?: string): Promise<PaymentRequirements[]> {
   const maxTimeoutSeconds = Math.min(60, Math.floor(NONCE_TTL_MS / 1000)); // <= blockhash/window; nonce TTL covers it
   const solUsdRate = await getSolUsdRate();
   const nonce = memo.replace(/^magpie-x402:/, "");
@@ -208,6 +215,10 @@ export async function buildSplAccepts(endpoint: string, amountLamports: bigint, 
   // challenge→settle SOL/USD drift. (audit #2.)
   const mk = (amount: string, asset: string): PaymentRequirements => ({
     scheme: "exact", network: SOLANA_CAIP2, payTo: getPayTo(), maxTimeoutSeconds,
+    // Spec fields strict x402 indexers / facilitators read. maxAmountRequired
+    // mirrors `amount` (kept for our native settle path); resource binds this
+    // accept to the paid URL so a crawler can turn it into a payable request.
+    maxAmountRequired: amount, resource, description: description ?? "Magpie x402 paid endpoint", mimeType: "application/json",
     extra: { feePayer, memo, priceCommit: mintPriceCommit(endpoint, asset, amount, nonce) },
     amount, asset,
   });
