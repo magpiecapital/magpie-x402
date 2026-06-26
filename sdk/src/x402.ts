@@ -37,14 +37,28 @@ export interface PaidCallResult<T> {
   } | null;
 }
 
+export interface X402ErrorOptions {
+  /** Machine-readable failure code, e.g. "confirm_timeout" | "tx_failed" | "submit_failed". */
+  code?: string;
+  /** True when retrying the same logical request (rebuild + resubmit) may succeed. */
+  retryable?: boolean;
+}
+
 export class X402Error extends Error {
   readonly status: number;
   readonly response: unknown;
-  constructor(message: string, status: number, response: unknown) {
+  /** Machine-readable code — lets agents branch retry vs re-quote vs fatal without string-matching the message. */
+  readonly code?: string;
+  /** True when the failure is transient and a rebuild + resubmit may succeed. */
+  readonly retryable: boolean;
+  constructor(message: string, status: number, response: unknown, opts: X402ErrorOptions = {}) {
     super(message);
     this.name = "X402Error";
     this.status = status;
     this.response = response;
+    this.code = opts.code;
+    // Default retryability from the HTTP status when not explicitly set: 429/502/503 are transient.
+    this.retryable = opts.retryable ?? (status === 429 || status === 502 || status === 503);
   }
 }
 
