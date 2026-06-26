@@ -38,6 +38,7 @@ import { Connection, Keypair, PublicKey, Transaction } from "@solana/web3.js";
 import { freeGet, paidCall, X402Context, X402Error } from "./x402.js";
 import { buildSignedEnvelope, buildManagementHeaders, signerFromKeypair } from "./envelope.js";
 import type { MagpieSigner } from "./envelope.js";
+import { sendAndConfirmRaw } from "./submit.js";
 
 export { X402Error };
 export { verifyWebhookSignature, IntentMatchedPayload } from "./webhooks.js";
@@ -73,6 +74,12 @@ export interface PoolState {
   paused: boolean;
 }
 
+/**
+ * @deprecated Misleading and unused — NO method returns this snake_case shape.
+ * Every loan-returning method (`loan`, `loanByPda`, `walletLoans`, `liquidatable`)
+ * returns the camelCase {@link AgentLoan}. Use `AgentLoan` instead. Kept only so
+ * existing imports don't break; will be removed in a future major.
+ */
 export interface LoanInfo {
   loan_pda: string;
   loan_id: string;
@@ -175,6 +182,16 @@ export interface RepayResult {
   /** On-chain tx signature of the confirmed repay. */
   signature: string;
   /** The loan PDA that was repaid and closed. */
+  loanPda: string;
+  /** Total x402 + network fees paid in this round-trip. */
+  feesPaidLamports: bigint;
+}
+
+/** Result of a loan-management action (extend / top-up / partial-repay). */
+export interface LoanManageResult {
+  /** On-chain tx signature of the confirmed action. */
+  signature: string;
+  /** The loan PDA that was acted on. */
   loanPda: string;
   /** Total x402 + network fees paid in this round-trip. */
   feesPaidLamports: bigint;
@@ -572,6 +589,77 @@ export class MagpieAgent {
   }
 
   /**
+   * Extend a loan's due date (the program applies the tier's standard extension).
+   * Magpie liquidates on TIME, so extending is the cheapest way to avoid a default
+   * when you can't yet cover a full repay. Borrower-only; you sign. Paid: 0.002 SOL.
+   */
+  async extend(opts: { loanPda: PublicKey | string }): Promise<LoanManageResult> {
+    const keypair = this.requireSigner("extend");
+    const loanPda = typeof opts.loanPda === "string" ? opts.loanPda : opts.loanPda.toBase58();
+    const built = await paidCall<{ partial_signed_tx_b64: string }>(
+      this.ctx,
+      "POST",
+      "/api/v1/agent/build-extend",
+      { body: { borrower_wallet: keypair.publicKey.toBase58(), loan_pda: loanPda } },
+    );
+    const sig = await this.signAndSubmit(built.data.partial_signed_tx_b64, keypair);
+    return { signature: sig, loanPda, feesPaidLamports: built.paid?.amountLamports ?? 0n };
+  }
+
+  /**
+   * Add more collateral to an existing loan (improves its health/LTV).
+   * `extraCollateralAmount` is in the collateral token's base units (u64).
+   * Borrower-only; you sign. Paid: 0.002 SOL.
+   */
+  async topup(opts: {
+    loanPda: PublicKey | string;
+    extraCollateralAmount: bigint | string;
+  }): Promise<LoanManageResult> {
+    const keypair = this.requireSigner("topup");
+    const loanPda = typeof opts.loanPda === "string" ? opts.loanPda : opts.loanPda.toBase58();
+    const built = await paidCall<{ partial_signed_tx_b64: string }>(
+      this.ctx,
+      "POST",
+      "/api/v1/agent/build-topup",
+      {
+        body: {
+          borrower_wallet: keypair.publicKey.toBase58(),
+          loan_pda: loanPda,
+          extra_collateral_amount: String(opts.extraCollateralAmount),
+        },
+      },
+    );
+    const sig = await this.signAndSubmit(built.data.partial_signed_tx_b64, keypair);
+    return { signature: sig, loanPda, feesPaidLamports: built.paid?.amountLamports ?? 0n };
+  }
+
+  /**
+   * Pay DOWN part of a loan's debt (in lamports) without closing it — cuts
+   * liquidation risk and frees headroom. Borrower-only; you sign. Paid: 0.002 SOL.
+   */
+  async partialRepay(opts: {
+    loanPda: PublicKey | string;
+    repayLamports: bigint | string;
+  }): Promise<LoanManageResult> {
+    const keypair = this.requireSigner("partialRepay");
+    const loanPda = typeof opts.loanPda === "string" ? opts.loanPda : opts.loanPda.toBase58();
+    const built = await paidCall<{ partial_signed_tx_b64: string }>(
+      this.ctx,
+      "POST",
+      "/api/v1/agent/build-partial-repay",
+      {
+        body: {
+          borrower_wallet: keypair.publicKey.toBase58(),
+          loan_pda: loanPda,
+          repay_lamports: String(opts.repayLamports),
+        },
+      },
+    );
+    const sig = await this.signAndSubmit(built.data.partial_signed_tx_b64, keypair);
+    return { signature: sig, loanPda, feesPaidLamports: built.paid?.amountLamports ?? 0n };
+  }
+
+  /**
    * Post a conditional borrow intent. Bot watches the trigger and
    * builds the unsigned tx when matched. Optional webhook URL gets
    * an HMAC-signed POST on match (zero polling required).
@@ -966,11 +1054,30 @@ export class MagpieAgent {
 
   private async signAndSubmit(partialTxB64: string, signer: MagpieSigner): Promise<string> {
     const tx = Transaction.from(Buffer.from(partialTxB64, "base64"));
+    // SECURITY — every tx reaching signAndSubmit (deposit/withdraw/liquidate/repay)
+    // is OUR action: WE are the fee payer. Refuse to sign a build-endpoint tx whose
+    // fee payer was swapped to drain us (a compromised / MITM'd build response).
+    // Refusing only fails the call — the operation retries with a fresh build.
+    // NOTE: borrow() is intentionally NOT guarded by fee-payer-is-self — its cosign
+    // flow has a different fee-payer model that must be verified before adding a
+    // guard, or it would break legitimate borrows (cf. Jupiter Ultra gasless).
+    const feePayer = tx.feePayer ?? tx.signatures[0]?.publicKey;
+    if (!feePayer || !feePayer.equals(signer.publicKey)) {
+      throw new X402Error(
+        `refusing to sign — built tx fee payer ${feePayer?.toBase58() ?? "(none)"} is not this wallet ` +
+          `${signer.publicKey.toBase58()} (possible substituted / MITM'd build response).`,
+        0,
+        null,
+        { code: "fee_payer_mismatch", retryable: false },
+      );
+    }
     const signedTx = await signer.signTransaction(tx);
     const connection = new Connection(this.ctx.rpcUrl, "confirmed");
-    const sig = await connection.sendRawTransaction(signedTx.serialize());
-    await connection.confirmTransaction(sig, "confirmed");
-    return sig;
+    // Dedupe-safe re-broadcast + bounded, structured confirmation (replaces a
+    // single send + deprecated signature-only confirm). Throws a RETRYABLE
+    // X402Error on confirm-timeout (blockhash expiry) so the caller can rebuild
+    // + resubmit, and a non-retryable one on an on-chain failure.
+    return await sendAndConfirmRaw(connection, signedTx.serialize());
   }
 
   private requireSigner(action: string): MagpieSigner {
