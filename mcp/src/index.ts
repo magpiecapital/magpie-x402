@@ -224,6 +224,58 @@ const TOOLS = [
     },
   },
   {
+    name: "magpie_build_extend",
+    description:
+      "Build an UNSIGNED extend tx for one of YOUR OWN active loans — pushes the due date out so the loan doesn't hit Magpie's TIME-based liquidation. Magpie liquidates on the clock, not on price, so extend / top-up / partial-repay before the deadline is the agent's primary survival lever. The x402 payer MUST equal borrower_wallet (you only manage your own loans). Agent signs locally and submits. Paid: 0.002 SOL.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        borrower_wallet: { type: "string", description: "Your wallet — must equal the x402 payment signer." },
+        loan_pda: { type: "string", description: "The loan's on-chain PDA (from magpie_wallet_loans / magpie_loan_by_pda)." },
+      },
+      required: ["borrower_wallet", "loan_pda"],
+    },
+  },
+  {
+    name: "magpie_build_topup",
+    description:
+      "Build an UNSIGNED top-up tx that adds more collateral to one of YOUR OWN active loans — improves the loan's health/LTV. The x402 payer MUST equal borrower_wallet. Agent signs locally and submits. Paid: 0.002 SOL.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        borrower_wallet: { type: "string", description: "Your wallet — must equal the x402 payment signer." },
+        loan_pda: { type: "string", description: "The loan's on-chain PDA." },
+        extra_collateral_amount: {
+          type: "string",
+          pattern: "^[0-9]{1,20}$",
+          description: "Additional collateral to add, in base units (u64 string).",
+        },
+      },
+      required: ["borrower_wallet", "loan_pda", "extra_collateral_amount"],
+    },
+  },
+  {
+    name: "magpie_build_partial_repay",
+    description:
+      "Build an UNSIGNED partial-repay tx for one of YOUR OWN active loans — pay down part of the debt (in lamports) without closing the loan, cutting liquidation risk and freeing headroom. The x402 payer MUST equal borrower_wallet. Agent signs locally and submits. Paid: 0.002 SOL.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        borrower_wallet: { type: "string", description: "Your wallet — must equal the x402 payment signer." },
+        loan_pda: { type: "string", description: "The loan's on-chain PDA." },
+        repay_lamports: {
+          type: "string",
+          pattern: "^[0-9]{1,20}$",
+          description: "Amount of debt to repay now, in lamports (u64 string).",
+        },
+      },
+      required: ["borrower_wallet", "loan_pda", "repay_lamports"],
+    },
+  },
+  {
     name: "magpie_build_deposit",
     description:
       "Build an UNSIGNED LP-deposit transaction (wraps SOL → wSOL → deposits into the main LendingPool → closes wSOL ATA). Agent signs and submits. Paid: 0.002 SOL.",
@@ -450,7 +502,7 @@ const TOOLS = [
 const server = new Server(
   {
     name: "magpie-mcp",
-    version: "0.1.0",
+    version: "0.2.0",
   },
   {
     capabilities: { tools: {} },
@@ -539,6 +591,15 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         break;
       case "magpie_build_repay":
         result = await call(ctx, "POST", "/api/v1/agent/build-repay", { body: a });
+        break;
+      case "magpie_build_extend":
+        result = await call(ctx, "POST", "/api/v1/agent/build-extend", { body: a });
+        break;
+      case "magpie_build_topup":
+        result = await call(ctx, "POST", "/api/v1/agent/build-topup", { body: a });
+        break;
+      case "magpie_build_partial_repay":
+        result = await call(ctx, "POST", "/api/v1/agent/build-partial-repay", { body: a });
         break;
       case "magpie_build_deposit":
         result = await call(ctx, "POST", "/api/v1/agent/build-deposit", { body: a });
