@@ -65,6 +65,13 @@ export interface AgentConfig {
   /** Hard cap on SOL spent per buy (lamports). 0 = no cap beyond the solvency reserve. */
   maxBuyLamports: bigint;
   /**
+   * Minimum collateral VALUE (lamports) before we will collateralize/borrow.
+   * Guards against paying the build-borrow x402 fee on a loan that's too small
+   * to be accepted — e.g. collateralizing leftover dust the wallet already
+   * holds. Applies to BOTH the held-collateral and buy paths. 0 = no floor.
+   */
+  minCollateralLamports: bigint;
+  /**
    * Repay this far before due, as a FRACTION of the loan term (0.5 = repay at
    * the halfway point). Wide leads survive RPC blips + retries. Also bounded
    * by repayLeadSecondsMin.
@@ -132,6 +139,11 @@ export function loadConfig(): AgentConfig {
 
     maxOpenLoans: num(process.env.MAX_OPEN_LOANS, 1),
     maxBuyLamports: BigInt(Math.round(num(process.env.MAX_BUY_SOL, 0) * 1e9)),
+    // Default 1.0 SOL: blocks dust (sub-0.25-SOL leftovers) while staying below a
+    // typical MAX_BUY_SOL (e.g. 2) so a fresh max-size buy clears the floor with
+    // slippage headroom. MUST be < MAX_BUY_SOL (minus slippage) or the buy path
+    // can never borrow — the boot guard in agent.ts warns if that's violated.
+    minCollateralLamports: BigInt(Math.round(num(process.env.MIN_COLLATERAL_SOL, 1.0) * 1e9)),
     repayLeadFraction: num(process.env.REPAY_LEAD_FRACTION, 0.5),
     repayLeadSecondsMin: num(process.env.REPAY_LEAD_SECONDS_MIN, 6 * 3600), // >= 6h before due
 
