@@ -187,6 +187,16 @@ export interface RepayResult {
   feesPaidLamports: bigint;
 }
 
+/** Result of a loan-management action (extend / top-up / partial-repay). */
+export interface LoanManageResult {
+  /** On-chain tx signature of the confirmed action. */
+  signature: string;
+  /** The loan PDA that was acted on. */
+  loanPda: string;
+  /** Total x402 + network fees paid in this round-trip. */
+  feesPaidLamports: bigint;
+}
+
 export interface IntentResult {
   intentId: string;
   status: "pending" | "matched" | "expired" | "cancelled";
@@ -576,6 +586,77 @@ export class MagpieAgent {
       loanPda,
       feesPaidLamports: built.paid?.amountLamports ?? 0n,
     };
+  }
+
+  /**
+   * Extend a loan's due date (the program applies the tier's standard extension).
+   * Magpie liquidates on TIME, so extending is the cheapest way to avoid a default
+   * when you can't yet cover a full repay. Borrower-only; you sign. Paid: 0.002 SOL.
+   */
+  async extend(opts: { loanPda: PublicKey | string }): Promise<LoanManageResult> {
+    const keypair = this.requireSigner("extend");
+    const loanPda = typeof opts.loanPda === "string" ? opts.loanPda : opts.loanPda.toBase58();
+    const built = await paidCall<{ partial_signed_tx_b64: string }>(
+      this.ctx,
+      "POST",
+      "/api/v1/agent/build-extend",
+      { body: { borrower_wallet: keypair.publicKey.toBase58(), loan_pda: loanPda } },
+    );
+    const sig = await this.signAndSubmit(built.data.partial_signed_tx_b64, keypair);
+    return { signature: sig, loanPda, feesPaidLamports: built.paid?.amountLamports ?? 0n };
+  }
+
+  /**
+   * Add more collateral to an existing loan (improves its health/LTV).
+   * `extraCollateralAmount` is in the collateral token's base units (u64).
+   * Borrower-only; you sign. Paid: 0.002 SOL.
+   */
+  async topup(opts: {
+    loanPda: PublicKey | string;
+    extraCollateralAmount: bigint | string;
+  }): Promise<LoanManageResult> {
+    const keypair = this.requireSigner("topup");
+    const loanPda = typeof opts.loanPda === "string" ? opts.loanPda : opts.loanPda.toBase58();
+    const built = await paidCall<{ partial_signed_tx_b64: string }>(
+      this.ctx,
+      "POST",
+      "/api/v1/agent/build-topup",
+      {
+        body: {
+          borrower_wallet: keypair.publicKey.toBase58(),
+          loan_pda: loanPda,
+          extra_collateral_amount: String(opts.extraCollateralAmount),
+        },
+      },
+    );
+    const sig = await this.signAndSubmit(built.data.partial_signed_tx_b64, keypair);
+    return { signature: sig, loanPda, feesPaidLamports: built.paid?.amountLamports ?? 0n };
+  }
+
+  /**
+   * Pay DOWN part of a loan's debt (in lamports) without closing it — cuts
+   * liquidation risk and frees headroom. Borrower-only; you sign. Paid: 0.002 SOL.
+   */
+  async partialRepay(opts: {
+    loanPda: PublicKey | string;
+    repayLamports: bigint | string;
+  }): Promise<LoanManageResult> {
+    const keypair = this.requireSigner("partialRepay");
+    const loanPda = typeof opts.loanPda === "string" ? opts.loanPda : opts.loanPda.toBase58();
+    const built = await paidCall<{ partial_signed_tx_b64: string }>(
+      this.ctx,
+      "POST",
+      "/api/v1/agent/build-partial-repay",
+      {
+        body: {
+          borrower_wallet: keypair.publicKey.toBase58(),
+          loan_pda: loanPda,
+          repay_lamports: String(opts.repayLamports),
+        },
+      },
+    );
+    const sig = await this.signAndSubmit(built.data.partial_signed_tx_b64, keypair);
+    return { signature: sig, loanPda, feesPaidLamports: built.paid?.amountLamports ?? 0n };
   }
 
   /**
