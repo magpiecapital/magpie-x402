@@ -973,6 +973,23 @@ export class MagpieAgent {
 
   private async signAndSubmit(partialTxB64: string, signer: MagpieSigner): Promise<string> {
     const tx = Transaction.from(Buffer.from(partialTxB64, "base64"));
+    // SECURITY — every tx reaching signAndSubmit (deposit/withdraw/liquidate/repay)
+    // is OUR action: WE are the fee payer. Refuse to sign a build-endpoint tx whose
+    // fee payer was swapped to drain us (a compromised / MITM'd build response).
+    // Refusing only fails the call — the operation retries with a fresh build.
+    // NOTE: borrow() is intentionally NOT guarded by fee-payer-is-self — its cosign
+    // flow has a different fee-payer model that must be verified before adding a
+    // guard, or it would break legitimate borrows (cf. Jupiter Ultra gasless).
+    const feePayer = tx.feePayer ?? tx.signatures[0]?.publicKey;
+    if (!feePayer || !feePayer.equals(signer.publicKey)) {
+      throw new X402Error(
+        `refusing to sign — built tx fee payer ${feePayer?.toBase58() ?? "(none)"} is not this wallet ` +
+          `${signer.publicKey.toBase58()} (possible substituted / MITM'd build response).`,
+        0,
+        null,
+        { code: "fee_payer_mismatch", retryable: false },
+      );
+    }
     const signedTx = await signer.signTransaction(tx);
     const connection = new Connection(this.ctx.rpcUrl, "confirmed");
     // Dedupe-safe re-broadcast + bounded, structured confirmation (replaces a
