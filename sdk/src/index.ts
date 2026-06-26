@@ -38,6 +38,7 @@ import { Connection, Keypair, PublicKey, Transaction } from "@solana/web3.js";
 import { freeGet, paidCall, X402Context, X402Error } from "./x402.js";
 import { buildSignedEnvelope, buildManagementHeaders, signerFromKeypair } from "./envelope.js";
 import type { MagpieSigner } from "./envelope.js";
+import { sendAndConfirmRaw } from "./submit.js";
 
 export { X402Error };
 export { verifyWebhookSignature, IntentMatchedPayload } from "./webhooks.js";
@@ -73,6 +74,12 @@ export interface PoolState {
   paused: boolean;
 }
 
+/**
+ * @deprecated Misleading and unused — NO method returns this snake_case shape.
+ * Every loan-returning method (`loan`, `loanByPda`, `walletLoans`, `liquidatable`)
+ * returns the camelCase {@link AgentLoan}. Use `AgentLoan` instead. Kept only so
+ * existing imports don't break; will be removed in a future major.
+ */
 export interface LoanInfo {
   loan_pda: string;
   loan_id: string;
@@ -968,9 +975,11 @@ export class MagpieAgent {
     const tx = Transaction.from(Buffer.from(partialTxB64, "base64"));
     const signedTx = await signer.signTransaction(tx);
     const connection = new Connection(this.ctx.rpcUrl, "confirmed");
-    const sig = await connection.sendRawTransaction(signedTx.serialize());
-    await connection.confirmTransaction(sig, "confirmed");
-    return sig;
+    // Dedupe-safe re-broadcast + bounded, structured confirmation (replaces a
+    // single send + deprecated signature-only confirm). Throws a RETRYABLE
+    // X402Error on confirm-timeout (blockhash expiry) so the caller can rebuild
+    // + resubmit, and a non-retryable one on an on-chain failure.
+    return await sendAndConfirmRaw(connection, signedTx.serialize());
   }
 
   private requireSigner(action: string): MagpieSigner {
