@@ -11,7 +11,7 @@
  *    and test with a tiny amount first (real swaps are mainnet-only).
  */
 import { Connection, Keypair, VersionedTransaction } from "@solana/web3.js";
-import { assertFeePayerIsSelf } from "./tx-guard.js";
+import { assertSelfIsRequiredSigner } from "./tx-guard.js";
 
 export const WSOL_MINT = "So11111111111111111111111111111111111111112";
 const JUPITER_BASE = process.env.JUPITER_BASE ?? "https://lite-api.jup.ag";
@@ -66,10 +66,11 @@ export async function jupiterBuy(opts: {
 
   // 2) Sign the returned transaction locally (keys never leave this process).
   const tx = VersionedTransaction.deserialize(Buffer.from(order.transaction, "base64"));
-  // SECURITY — the swap must be fee-paid by us; refuse a substituted tx whose
-  // payer is someone else before we add our signature (defense-in-depth on a
-  // server-built tx). A skipped swap is safe; the cycle simply retries.
-  assertFeePayerIsSelf(tx, opts.payer.publicKey, "jupiter-swap");
+  // SECURITY — Jupiter Ultra returns a GASLESS swap: Jupiter / the RFQ maker is
+  // the fee payer BY DESIGN, so we do NOT assert fee-payer-is-self (that refuses
+  // every legitimate Ultra swap). We DO refuse to blind-sign a tx that doesn't
+  // require our signature. A skipped swap is safe; the cycle simply retries.
+  assertSelfIsRequiredSigner(tx, opts.payer.publicKey, "jupiter-swap");
   tx.sign([opts.payer]);
 
   // 3) Hand the signed tx back to Jupiter to land + confirm.
@@ -139,6 +140,9 @@ export async function jupiterSell(opts: {
   }
 
   const tx = VersionedTransaction.deserialize(Buffer.from(order.transaction, "base64"));
+  // SECURITY — same Ultra gasless model as the buy path: require our signature,
+  // allow Jupiter / the RFQ maker to pay the fee.
+  assertSelfIsRequiredSigner(tx, opts.payer.publicKey, "jupiter-sell");
   tx.sign([opts.payer]);
 
   const execRes = await jfetch(`${JUPITER_BASE}/ultra/v1/execute`, {
