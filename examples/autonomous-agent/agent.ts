@@ -175,6 +175,19 @@ async function runCycle(agent: MagpieAgent, guardian: LoanGuardian, notifier: No
       await notifier.send("hold", "Nothing deployable while keeping repay reserves — holding (never-default invariant doing its job).");
       return;
     }
+    // PRE-BUY FLOOR — if we can't even buy MIN_COLLATERAL worth, the post-buy
+    // gate below would skip the borrow anyway, leaving us holding a token we
+    // can't collateralize. Slippage only LOWERS the resale value, so
+    // buyLamports < floor guarantees the bought collateral lands below it.
+    // Skip the cycle instead of spending SOL (+ slippage) on un-borrowable dust.
+    if (cfg.minCollateralLamports > 0n && buyLamports < cfg.minCollateralLamports) {
+      await notifier.send(
+        "hold",
+        `Skipping buy of ${candidate.symbol}: deployable ${fmt(buyLamports)} SOL is below the ${fmt(cfg.minCollateralLamports)} SOL ` +
+          `collateral minimum — won't buy collateral too small to borrow against. Fund the wallet for larger/continuous loans.`,
+      );
+      return;
+    }
     // BUY on Jupiter (Magpie can't — it's a lender, not a DEX).
     const buy = await jupiterBuy({
       payer: agentKeypair(),
