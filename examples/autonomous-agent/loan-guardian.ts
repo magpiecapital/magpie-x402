@@ -229,16 +229,25 @@ export class LoanGuardian {
   // ── the watcher ───────────────────────────────────────────────────────────
   async tick(): Promise<void> {
     let active: NLoan[];
+    let complete: boolean;
     try {
       const r = await this.agent.walletLoans(this.self, { status: "active" });
       active = (r.loans as unknown as Record<string, unknown>[]).map(norm).filter((l) => l.status === "active" && l.loanId);
+      // A non-empty `partial` map means a version lane errored — the active list
+      // is INCOMPLETE this tick, so an absent tracked loan may just be unreadable.
+      complete = Object.keys((r as { partial?: Record<string, unknown> }).partial ?? {}).length === 0;
     } catch (err) {
       log(`sync failed (will retry next tick): ${(err as Error).message}`);
       return;
     }
 
     const activeIds = new Set(active.map((l) => l.loanId));
-    for (const id of [...this.tracked.keys()]) if (!activeIds.has(id)) this.tracked.delete(id);
+    // NEVER drop a tracked loan on an incomplete read — abandoning a still-open
+    // loan is the exact time-based default this guardian exists to prevent.
+    // Reconcile deletions only on a fully-successful (complete) read.
+    if (complete) {
+      for (const id of [...this.tracked.keys()]) if (!activeIds.has(id)) this.tracked.delete(id);
+    }
     for (const l of active) this.tracked.set(l.loanId, l);
 
     const now = nowUnix();
@@ -277,9 +286,12 @@ export class LoanGuardian {
 
   private async repayLoop(loan: NLoan): Promise<void> {
     for (let attempt = 1; ; attempt++) {
-      const still = await this.findActiveLoan(loan.loanId).catch(() => undefined);
-      if (still === undefined && attempt > 1) {
-        log(`loan ${loan.loanId} no longer active — done.`);
+      // Partial-aware liveness: conclude a loan is gone ONLY on a COMPLETE read
+      // showing it absent. A thrown or partial read = "unknown this attempt" →
+      // keep trying; never delete (and stop repaying) a loan we couldn't fully read.
+      const state = await this.readLoanState(loan.loanId).catch(() => ({ loan: undefined, complete: false }));
+      if (!state.loan && state.complete && attempt > 1) {
+        log(`loan ${loan.loanId} no longer active (confirmed by a complete read) — done.`);
         this.tracked.delete(loan.loanId);
         return;
       }
@@ -323,9 +335,24 @@ export class LoanGuardian {
     return Math.max(this.cfg.repayLeadSecondsMin, Math.floor(term * this.cfg.repayLeadFraction));
   }
 
-  private async findActiveLoan(loanId: string): Promise<NLoan | undefined> {
+  /**
+   * Read a single loan's live state. `complete` is true ONLY when the wallet-loans
+   * read succeeded across ALL version lanes (empty `partial` map). A loan missing
+   * from an INCOMPLETE read means "unreadable this tick", NOT "gone" — never delete
+   * on that basis, or a transient one-lane RPC blip would abandon a still-open loan
+   * and let it default. (Audit 2026-06-20.)
+   */
+  private async readLoanState(loanId: string): Promise<{ loan?: NLoan; complete: boolean }> {
     const r = await this.agent.walletLoans(this.self, { status: "active" });
-    return (r.loans as unknown as Record<string, unknown>[]).map(norm).find((l) => l.loanId === loanId && l.status === "active");
+    const complete = Object.keys((r as { partial?: Record<string, unknown> }).partial ?? {}).length === 0;
+    const loan = (r.loans as unknown as Record<string, unknown>[])
+      .map(norm)
+      .find((l) => l.loanId === loanId && l.status === "active");
+    return { loan, complete };
+  }
+
+  private async findActiveLoan(loanId: string): Promise<NLoan | undefined> {
+    return (await this.readLoanState(loanId)).loan;
   }
 
   /** For dashboards/logging. */
