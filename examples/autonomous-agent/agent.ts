@@ -33,6 +33,13 @@ import { RULES } from "./magpie-playbook.js";
 const log = (s = "") => console.log(s);
 const cfg = loadConfig();
 
+// VARIETY — rotate borrow collateral so the agent doesn't keep cycling in/out of
+// the SAME token (e.g. BOME every cycle). Tracks recently-used mints ACROSS
+// cycles; chooseCandidate excludes the last VARIETY_AVOID_LAST of them from the
+// menu — but never empties it, so a thin wallet still borrows.
+const recentCollateral: string[] = [];
+const VARIETY_AVOID_LAST = Math.max(0, Number(process.env.VARIETY_AVOID_LAST ?? 2));
+
 /**
  * Load the agent's signing key from EITHER an env secret (MAGPIE_PAYER_SECRET —
  * bs58 string or JSON byte array; ideal for Railway) OR a local file path
@@ -175,6 +182,19 @@ async function runCycle(agent: MagpieAgent, guardian: LoanGuardian, notifier: No
       await notifier.send("hold", "Nothing deployable while keeping repay reserves — holding (never-default invariant doing its job).");
       return;
     }
+    // PRE-BUY FLOOR — if we can't even buy MIN_COLLATERAL worth, the post-buy
+    // gate below would skip the borrow anyway, leaving us holding a token we
+    // can't collateralize. Slippage only LOWERS the resale value, so
+    // buyLamports < floor guarantees the bought collateral lands below it.
+    // Skip the cycle instead of spending SOL (+ slippage) on un-borrowable dust.
+    if (cfg.minCollateralLamports > 0n && buyLamports < cfg.minCollateralLamports) {
+      await notifier.send(
+        "hold",
+        `Skipping buy of ${candidate.symbol}: deployable ${fmt(buyLamports)} SOL is below the ${fmt(cfg.minCollateralLamports)} SOL ` +
+          `collateral minimum — won't buy collateral too small to borrow against. Fund the wallet for larger/continuous loans.`,
+      );
+      return;
+    }
     // BUY on Jupiter (Magpie can't — it's a lender, not a DEX).
     const buy = await jupiterBuy({
       payer: agentKeypair(),
@@ -299,16 +319,28 @@ async function chooseCandidate(agent: MagpieAgent, notifier: Notifier): Promise<
   }
   if (!pool.length) return null;
 
-  // BRAIN — Claude proposes from the allowed menu (and may say HOLD); on any
-  // failure or no key, fall back to the deterministic first pick (held-first).
-  let pick = pool[0];
+  // VARIETY — don't borrow against the same collateral every cycle. Exclude the
+  // most-recently-used mint(s) so consecutive loans rotate across the eligible
+  // set (BOME → POPCAT → … instead of BOME every time). Capped at pool.length-1
+  // so the menu is never emptied — a single-token wallet still borrows.
+  const avoidN = Math.min(VARIETY_AVOID_LAST, pool.length - 1);
+  const avoid = new Set(avoidN > 0 ? recentCollateral.slice(-avoidN) : []);
+  const varied = pool.filter((t) => !avoid.has(t.mint));
+  const menu = varied.length ? varied : pool;
+  if (avoid.size && menu.length < pool.length) {
+    log(`VARIETY — rotating off ${pool.length - menu.length} recently-used collateral; ${menu.length} option(s) this cycle.`);
+  }
+
+  // BRAIN — Claude proposes from the (variety-filtered) menu and may say HOLD; on
+  // any failure or no key, fall back to the deterministic first pick (held-first).
+  let pick = menu[0];
   if (brainEnabled()) {
     try {
-      const decision = await chooseCandidateWithClaude(agent, cfg, pool);
+      const decision = await chooseCandidateWithClaude(agent, cfg, menu);
       log(`BRAIN(Claude) — ${decision.action.toUpperCase()}${decision.symbol ? " " + decision.symbol : ""} · conf ${decision.confidence.toFixed(2)} · ${decision.reasoning}`);
       await notifier.send("brain", `Claude: ${decision.action.toUpperCase()}${decision.symbol ? " " + decision.symbol : ""} (conf ${decision.confidence.toFixed(2)}) — ${decision.reasoning}`);
       if (decision.action !== "buy" || !decision.mint) return null; // HOLD is a valid, safe outcome
-      const chosen = pool.find((t) => t.mint === decision.mint);
+      const chosen = menu.find((t) => t.mint === decision.mint);
       if (!chosen) {
         log("BRAIN — Claude picked a mint outside the allowed menu; rejecting for safety.");
         return null;
@@ -334,6 +366,9 @@ async function chooseCandidate(agent: MagpieAgent, notifier: Notifier): Promise<
       return null;
     }
   }
+  // Remember this cycle's collateral so the next cycle rotates off it (bounded ring).
+  recentCollateral.push(pick.mint);
+  if (recentCollateral.length > 16) recentCollateral.shift();
   return { mint: pick.mint, symbol: pick.symbol, category: pick.category, existingAmount: heldMap.get(pick.mint) };
 }
 

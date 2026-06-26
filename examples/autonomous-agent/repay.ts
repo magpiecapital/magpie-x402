@@ -10,9 +10,10 @@
  * The on-chain program computes the exact amount owed, so the repay pays
  * precisely what's due — the guardian's reserve is only a solvency buffer.
  */
-import { Connection, Keypair, Transaction } from "@solana/web3.js";
+import { Keypair, Transaction } from "@solana/web3.js";
 import { paidCall } from "./x402-client.js";
 import { assertFeePayerIsSelf } from "./tx-guard.js";
+import { rpcConnections, sendAndConfirmFailover } from "./submit.js";
 import type { AgentConfig } from "./config.js";
 
 export interface RepayResult {
@@ -40,8 +41,9 @@ export async function repayLoan(
   // server-built tx). Repay always re-attempts later, so a refusal is safe.
   assertFeePayerIsSelf(tx, keypair.publicKey, "build-repay");
   tx.partialSign(keypair);
-  const conn = new Connection(cfg.rpcUrl, "confirmed");
-  const sig = await conn.sendRawTransaction(tx.serialize());
-  await conn.confirmTransaction(sig, "confirmed");
+  // Broadcast + confirm with RPC failover, a dedupe-safe re-broadcast, and a
+  // searchTransactionHistory poll so a slow-but-landed repay is detected (not
+  // re-paid). The repay is the agent's single most safety-critical RPC.
+  const sig = await sendAndConfirmFailover(rpcConnections(cfg.rpcUrl), tx.serialize());
   return { signature: sig };
 }
