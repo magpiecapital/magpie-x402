@@ -13,76 +13,7 @@ import assert from "node:assert";
  * names, wrong paths, schema drift) fail CI.
  */
 
-// ── Inline tool registry extraction ───────────────────────────────
-// We import the raw TOOLS array indirectly by reading the source and
-// evaluating the const. This avoids importing index.ts (which starts
-// the MCP server on import). A lightweight approach keeps tests fast
-// and dependency-free.
-
-// Instead of importing the server, we replicate the registry shape for
-// testing. When the registry changes, update this mirror.
-
-interface ToolDef {
-  name: string;
-  description: string;
-  inputSchema: {
-    type: string;
-    properties: Record<string, unknown>;
-    required?: string[];
-  };
-}
-
-const TOOLS: ToolDef[] = [
-  // Free reads
-  { name: "magpie_pool_state", description: "", inputSchema: { type: "object", properties: {} } },
-  { name: "magpie_protocol_pulse", description: "", inputSchema: { type: "object", properties: {} } },
-  { name: "magpie_recent_activity", description: "", inputSchema: { type: "object", properties: { limit: {} } } },
-  { name: "magpie_loan", description: "", inputSchema: { type: "object", properties: { loan_id: {} }, required: ["loan_id"] } },
-  { name: "magpie_wallet_loans", description: "", inputSchema: { type: "object", properties: { wallet: {}, status: {} }, required: ["wallet"] } },
-  { name: "magpie_tiers", description: "", inputSchema: { type: "object", properties: {} } },
-  { name: "magpie_simulate_borrow", description: "", inputSchema: { type: "object", properties: { mint: {}, amount: {}, decimals: {}, pricePerTokenUsd: {}, solPriceUsd: {}, tier: {} }, required: ["mint", "amount", "decimals", "pricePerTokenUsd", "solPriceUsd"] } },
-  { name: "magpie_collateral_eligible", description: "", inputSchema: { type: "object", properties: {} } },
-  { name: "magpie_liquidatable", description: "", inputSchema: { type: "object", properties: { within_seconds: {}, limit: {} } } },
-  { name: "magpie_credit_leaderboard", description: "", inputSchema: { type: "object", properties: {} } },
-  { name: "magpie_lp_state", description: "", inputSchema: { type: "object", properties: { wallet: {} }, required: ["wallet"] } },
-  { name: "magpie_loan_by_pda", description: "", inputSchema: { type: "object", properties: { loan_pda: {} }, required: ["loan_pda"] } },
-  { name: "magpie_pools", description: "", inputSchema: { type: "object", properties: {} } },
-  // Paid reads
-  { name: "magpie_credit_score", description: "", inputSchema: { type: "object", properties: { wallet: {} }, required: ["wallet"] } },
-  { name: "magpie_token_risk", description: "", inputSchema: { type: "object", properties: { mint: {} }, required: ["mint"] } },
-  // Paid builders
-  { name: "magpie_build_borrow", description: "", inputSchema: { type: "object", properties: { borrower_wallet: {}, collateral_mint: {}, collateral_amount: {}, tier: {} }, required: ["borrower_wallet", "collateral_mint", "collateral_amount", "tier"] } },
-  { name: "magpie_build_repay", description: "", inputSchema: { type: "object", properties: { borrower_wallet: {}, loan_id: {} }, required: ["borrower_wallet", "loan_id"] } },
-  { name: "magpie_build_extend", description: "", inputSchema: { type: "object", properties: { borrower_wallet: {}, loan_pda: {} }, required: ["borrower_wallet", "loan_pda"] } },
-  { name: "magpie_build_topup", description: "", inputSchema: { type: "object", properties: { borrower_wallet: {}, loan_pda: {}, extra_collateral_amount: {} }, required: ["borrower_wallet", "loan_pda", "extra_collateral_amount"] } },
-  { name: "magpie_build_partial_repay", description: "", inputSchema: { type: "object", properties: { borrower_wallet: {}, loan_pda: {}, repay_lamports: {} }, required: ["borrower_wallet", "loan_pda", "repay_lamports"] } },
-  { name: "magpie_build_deposit", description: "", inputSchema: { type: "object", properties: { depositor: {}, lamports: {} }, required: ["depositor", "lamports"] } },
-  { name: "magpie_build_withdraw", description: "", inputSchema: { type: "object", properties: { depositor: {}, shares: {} }, required: ["depositor", "shares"] } },
-  { name: "magpie_build_liquidate", description: "", inputSchema: { type: "object", properties: { keeper: {}, loan_pda: {} }, required: ["keeper", "loan_pda"] } },
-  // Intents
-  { name: "magpie_create_intent", description: "", inputSchema: { type: "object", properties: { borrower_wallet: {}, collateral_mint: {}, collateral_amount: {}, tier: {}, condition_type: {}, condition_params: {} }, required: ["borrower_wallet", "collateral_mint", "collateral_amount", "tier", "condition_type", "condition_params"] } },
-  { name: "magpie_get_intent", description: "", inputSchema: { type: "object", properties: { id: {} }, required: ["id"] } },
-  // V4 self-owned exit orders
-  { name: "magpie_arm_exit", description: "", inputSchema: { type: "object", properties: { loan_id: {} }, required: ["loan_id"] } },
-  { name: "magpie_modify_exit", description: "", inputSchema: { type: "object", properties: { order_id: {} }, required: ["order_id"] } },
-  { name: "magpie_cancel_exit", description: "", inputSchema: { type: "object", properties: { order_id: {} }, required: ["order_id"] } },
-  { name: "magpie_list_exits", description: "", inputSchema: { type: "object", properties: { wallet: {} }, required: ["wallet"] } },
-  // ── New parity tools ──────────────────────────────────────────
-  // Credit attestation
-  { name: "magpie_credit_attest", description: "", inputSchema: { type: "object", properties: { wallet: {} }, required: ["wallet"] } },
-  // Intent management
-  { name: "magpie_list_intents", description: "", inputSchema: { type: "object", properties: { wallet: {} }, required: ["wallet"] } },
-  { name: "magpie_cancel_intent", description: "", inputSchema: { type: "object", properties: { id: {} }, required: ["id"] } },
-  // Delegated agent limit-close
-  { name: "magpie_limit_close_arm", description: "", inputSchema: { type: "object", properties: { user_wallet: {}, loan_id: {}, trigger_kind: {}, trigger_value_micro: {}, slippage_bps: {} }, required: ["user_wallet", "loan_id", "trigger_kind", "trigger_value_micro", "slippage_bps"] } },
-  { name: "magpie_limit_close_preflight", description: "", inputSchema: { type: "object", properties: { user_wallet: {}, loan_id: {}, trigger_kind: {}, trigger_value_micro: {}, slippage_bps: {} }, required: ["user_wallet", "loan_id", "trigger_kind", "trigger_value_micro", "slippage_bps"] } },
-  { name: "magpie_limit_close_get", description: "", inputSchema: { type: "object", properties: { id: {} }, required: ["id"] } },
-  { name: "magpie_limit_close_list", description: "", inputSchema: { type: "object", properties: { status: {} } } },
-  { name: "magpie_limit_close_modify", description: "", inputSchema: { type: "object", properties: { id: {}, trigger_value_micro: {}, slippage_bps: {}, sell_destination: {}, expires_at: {} }, required: ["id"] } },
-  { name: "magpie_limit_close_cancel", description: "", inputSchema: { type: "object", properties: { id: {} }, required: ["id"] } },
-  { name: "magpie_limit_close_delegations", description: "", inputSchema: { type: "object", properties: {} } },
-  { name: "magpie_limit_close_eligible_loans", description: "", inputSchema: { type: "object", properties: {} } },
-];
+import { TOOLS } from "./tools.js";
 
 // ── Tool-to-endpoint mapping ─────────────────────────────────────
 // { method, path, paid, requiresEnvelope }
@@ -164,8 +95,6 @@ test("every paid tool has a non-empty description mentioning price", () => {
     if (route.paid) {
       const tool = TOOLS.find((t) => t.name === name);
       assert.ok(tool, `missing tool ${name}`);
-      // The mirror may have empty descriptions; just verify the tool exists
-      // and has the correct schema shape.
       assert.ok(tool.inputSchema, `${name}: paid tool should have an inputSchema`);
     }
   }
