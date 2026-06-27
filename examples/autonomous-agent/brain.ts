@@ -135,7 +135,7 @@ function taskPrompt(cfg: AgentConfig, menu: MenuItem[]): string {
     "ALLOWED MENU — you may ONLY pick a mint from this list; anything else is rejected:",
     list,
     "",
-    "Prefer assets marked ALREADY HELD when sensible — they cost no buy + no slippage.",
+    "DIVERSIFY — do NOT keep recycling the same few collateral assets cycle after cycle. Actively pick a DIFFERENT, high-quality asset than your recent picks to show real breadth across the supported universe. Buying FRESH collateral is expected and encouraged whenever you have the capital to clear the minimum loan size; rotate through a variety of strong names rather than defaulting to whatever is already in the wallet. Fall back to an ALREADY HELD asset ONLY when capital is too tight to buy a fresh one. Breadth and variety matter more than saving a small buy fee.",
     "",
     cfg.dryRun
       ? "DRY RUN — this is a no-funds REHEARSAL. The risk scores you get back are heuristic estimates; treat them as usable and prefer to make a real PICK (especially an ALREADY HELD asset) so the full borrow flow can be validated. Nothing moves. Only HOLD if every option is genuinely unsuitable."
