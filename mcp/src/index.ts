@@ -33,7 +33,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 import { call, loadKeypairFromEnv, type ClientCtx } from "./x402-client.js";
-import { buildSignedEnvelope } from "./envelope.js";
+import { buildSignedEnvelope, buildEnvelopeHeaders } from "./envelope.js";
 
 const baseUrl = process.env.MAGPIE_X402_BASE_URL ?? "https://x402.magpie.capital";
 const rpcUrl = process.env.SOLANA_RPC_URL ?? "https://api.mainnet-beta.solana.com";
@@ -496,13 +496,145 @@ const TOOLS = [
       "List the Magpie lending pools (program versions and their pool context) — V1 memecoin and V4 in-vault-exit lanes. FREE.",
     inputSchema: { type: "object", properties: {} },
   },
+  // ── Credit attestation ──────────────────────────────────────────
+  {
+    name: "magpie_credit_attest",
+    description:
+      "Pay-per-call ed25519-signed credit attestation. Returns the wallet's credit score WITH a cryptographic signature from the lender authority. Any consumer can verify — no need to trust this API. Useful for presenting creditworthiness to other protocols. 7-day TTL. Paid: 0.0005 SOL.",
+    inputSchema: {
+      type: "object",
+      properties: { wallet: { type: "string" } },
+      required: ["wallet"],
+    },
+  },
+  // ── Intent management ───────────────────────────────────────────
+  {
+    name: "magpie_list_intents",
+    description:
+      "List all pending conditional borrow intents for a wallet. Returns newest-first, max 100. Paid: 0.001 SOL.",
+    inputSchema: {
+      type: "object",
+      properties: { wallet: { type: "string" } },
+      required: ["wallet"],
+    },
+  },
+  {
+    name: "magpie_cancel_intent",
+    description:
+      "Cancel a pending conditional borrow intent. Free — don't tax cleanup. Requires a signed envelope to prove you own the intent.",
+    inputSchema: {
+      type: "object",
+      properties: { id: { type: "string" } },
+      required: ["id"],
+    },
+  },
+  // ── Delegated agent limit-close (third-party agent on borrower's loan) ──
+  {
+    name: "magpie_limit_close_arm",
+    description:
+      "Arm a delegated limit-close-and-sell order on ANOTHER wallet's loan. The borrower must have pre-authorized you via TG /agent-authorize. x402 payer IS the agent (not the borrower). The agent identity is the verified x402 payer pubkey. Paid: 0.001 SOL.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        user_wallet: { type: "string", description: "The borrower's custodial wallet pubkey." },
+        loan_id: { type: "string", description: "On-chain loan id (decimal string)." },
+        trigger_kind: { type: "string", enum: ["mc_usd", "price_usd", "price_sol"], description: "What metric triggers the sell." },
+        trigger_value_micro: { type: "string", description: "Trigger value — 1e6 USD micros or 1e9 SOL lamports." },
+        slippage_bps: { type: "integer", minimum: 10, maximum: 1000, description: "Max slippage tolerance in basis points." },
+        trigger_direction: { type: "string", enum: ["above", "below"], description: "'above' = take-profit (default), 'below' = stop-loss." },
+        sell_destination: { type: "string", enum: ["sol", "usdc"], description: "Proceeds asset. Default 'sol'." },
+        expires_at: { type: "string", description: "Optional ISO timestamp for auto-cancel." },
+        auto_escalate_slippage: { type: "boolean", description: "Let the engine widen slippage toward delegation cap on reverts." },
+      },
+      required: ["user_wallet", "loan_id", "trigger_kind", "trigger_value_micro", "slippage_bps"],
+    },
+  },
+  {
+    name: "magpie_limit_close_preflight",
+    description:
+      "Check whether a delegated limit-close arm would succeed WITHOUT paying. Same body shape as arm but free. Returns would_arm=true on success or the same error codes arm would return. Use before arming to save fees on rejected configs. Requires signed envelope.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        user_wallet: { type: "string" },
+        loan_id: { type: "string" },
+        trigger_kind: { type: "string", enum: ["mc_usd", "price_usd", "price_sol"] },
+        trigger_value_micro: { type: "string" },
+        slippage_bps: { type: "integer", minimum: 10, maximum: 1000 },
+        trigger_direction: { type: "string", enum: ["above", "below"] },
+        sell_destination: { type: "string", enum: ["sol", "usdc"] },
+        expires_at: { type: "string" },
+        auto_escalate_slippage: { type: "boolean" },
+      },
+      required: ["user_wallet", "loan_id", "trigger_kind", "trigger_value_micro", "slippage_bps"],
+    },
+  },
+  {
+    name: "magpie_limit_close_get",
+    description:
+      "Read a specific delegated limit-close order by ID. Free, scoped to the calling agent. Requires signed envelope.",
+    inputSchema: {
+      type: "object",
+      properties: { id: { type: "string", description: "The order ID (decimal string)." } },
+      required: ["id"],
+    },
+  },
+  {
+    name: "magpie_limit_close_list",
+    description:
+      "List all delegated limit-close orders for this agent. Free, scoped to the calling agent. Requires signed envelope.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        status: { type: "string", enum: ["armed", "all"], description: "Filter by status. Default 'armed'." },
+      },
+    },
+  },
+  {
+    name: "magpie_limit_close_modify",
+    description:
+      "Modify an existing delegated limit-close order in-place (change trigger value, slippage, destination, or expiry). Free — agent already paid to arm. Requires signed envelope bound to the order ID.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "The order ID to modify." },
+        trigger_value_micro: { type: "string", description: "New trigger value." },
+        slippage_bps: { type: "integer", minimum: 10, maximum: 1000, description: "New slippage." },
+        sell_destination: { type: "string", enum: ["sol", "usdc"], description: "New destination." },
+        expires_at: { type: "string", description: "New expiry (ISO) or null to clear." },
+      },
+      required: ["id"],
+    },
+  },
+  {
+    name: "magpie_limit_close_cancel",
+    description:
+      "Cancel a delegated limit-close order. Free. A too-late cancel (engine already firing) returns 409 no-op. Requires signed envelope bound to the order ID.",
+    inputSchema: {
+      type: "object",
+      properties: { id: { type: "string", description: "The order ID to cancel." } },
+      required: ["id"],
+    },
+  },
+  {
+    name: "magpie_limit_close_delegations",
+    description:
+      "Discover what this agent is authorized for — every active (user_wallet, bounds, usage) delegation. Standard startup call: see your surface, cache, then arm as orders come in. Free. Requires signed envelope.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "magpie_limit_close_eligible_loans",
+    description:
+      "The agent's full actionable surface — every (user_wallet, loan) tuple where this agent has an active delegation, with eligibility for each loan (is_eligible + ineligibility_reasons). Free. Requires signed envelope.",
+    inputSchema: { type: "object", properties: {} },
+  },
 ] as const;
 
 // ── Server wiring ─────────────────────────────────────────────────
 const server = new Server(
   {
     name: "magpie-mcp",
-    version: "0.2.0",
+    version: "0.3.0",
   },
   {
     capabilities: { tools: {} },
@@ -693,6 +825,102 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       case "magpie_pools":
         result = await call(ctx, "GET", "/api/v1/pools");
         break;
+      // ── Credit attestation ────────────────────────────────────────
+      case "magpie_credit_attest":
+        result = await call(ctx, "GET", "/api/v1/agent/credit-attest", {
+          query: { wallet: String(a.wallet) },
+        });
+        break;
+      // ── Intent management ─────────────────────────────────────────
+      case "magpie_list_intents":
+        result = await call(ctx, "GET", "/api/v1/agent/intents", {
+          query: { wallet: String(a.wallet) },
+        });
+        break;
+      case "magpie_cancel_intent": {
+        const kp = requirePayer();
+        const envH = buildEnvelopeHeaders(kp, "intent-cancel/v1", {
+          OrderId: String(a.id),
+        });
+        result = await call(ctx, "DELETE", "/api/v1/agent/intent", {
+          query: { id: String(a.id) },
+          headers: envH,
+        });
+        break;
+      }
+      // ── Delegated agent limit-close ───────────────────────────────
+      case "magpie_limit_close_arm":
+        result = await call(ctx, "POST", "/api/v1/agent/limit-close", { body: a });
+        break;
+      case "magpie_limit_close_preflight": {
+        const kp = requirePayer();
+        const envH = buildEnvelopeHeaders(kp, "limit-close-preflight/v1", {});
+        result = await call(ctx, "POST", "/api/v1/agent/limit-close/preflight", {
+          body: a,
+          headers: envH,
+        });
+        break;
+      }
+      case "magpie_limit_close_get": {
+        const kp = requirePayer();
+        const envH = buildEnvelopeHeaders(kp, "limit-close-get/v1", {
+          OrderId: String(a.id),
+        });
+        result = await call(ctx, "GET", "/api/v1/agent/limit-close", {
+          query: { id: String(a.id) },
+          headers: envH,
+        });
+        break;
+      }
+      case "magpie_limit_close_list": {
+        const kp = requirePayer();
+        const envH = buildEnvelopeHeaders(kp, "limit-close-list/v1", {});
+        const q: Record<string, string> = {};
+        if (a.status) q.status = String(a.status);
+        result = await call(ctx, "GET", "/api/v1/agent/limit-close/list", {
+          query: q,
+          headers: envH,
+        });
+        break;
+      }
+      case "magpie_limit_close_modify": {
+        const kp = requirePayer();
+        const envH = buildEnvelopeHeaders(kp, "limit-close-modify/v1", {
+          OrderId: String(a.id),
+        });
+        result = await call(ctx, "POST", "/api/v1/agent/limit-close/modify", {
+          body: a,
+          headers: envH,
+        });
+        break;
+      }
+      case "magpie_limit_close_cancel": {
+        const kp = requirePayer();
+        const envH = buildEnvelopeHeaders(kp, "limit-close-cancel/v1", {
+          OrderId: String(a.id),
+        });
+        result = await call(ctx, "DELETE", "/api/v1/agent/limit-close", {
+          query: { id: String(a.id) },
+          headers: envH,
+        });
+        break;
+      }
+      case "magpie_limit_close_delegations": {
+        const kp = requirePayer();
+        const envH = buildEnvelopeHeaders(kp, "limit-close-delegations/v1", {});
+        result = await call(ctx, "GET", "/api/v1/agent/limit-close/delegations", {
+          headers: envH,
+        });
+        break;
+      }
+      case "magpie_limit_close_eligible_loans": {
+        const kp = requirePayer();
+        const envH = buildEnvelopeHeaders(kp, "limit-close-eligible/v1", {});
+        result = await call(ctx, "GET", "/api/v1/agent/limit-close/eligible-loans", {
+          headers: envH,
+        });
+        break;
+      }
       default:
         return {
           isError: true,

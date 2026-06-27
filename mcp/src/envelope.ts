@@ -70,6 +70,24 @@ export interface SignedEnvelope {
  * automatically (unless you override them) — the bot requires all three and
  * enforces a 5-minute freshness window on IssuedAt + nonce-uniqueness.
  */
+/**
+ * Build envelope + return as HTTP headers for the delegated agent-limit-close
+ * management routes (X-Magpie-Env-Msg / -Sig / -Signer). These routes verify
+ * the envelope from request headers rather than a JSON body.
+ */
+export function buildEnvelopeHeaders(
+  keypair: Keypair,
+  action: string,
+  fields: Record<string, string | number | undefined | null> = {},
+): Record<string, string> {
+  const env = buildSignedEnvelope(keypair, action, fields);
+  return {
+    "X-Magpie-Env-Msg": env.signedMessageBase64,
+    "X-Magpie-Env-Sig": env.signatureBase58,
+    "X-Magpie-Env-Signer": env.signerPubkey,
+  };
+}
+
 export function buildSignedEnvelope(
   keypair: Keypair,
   magpieHeader: string,

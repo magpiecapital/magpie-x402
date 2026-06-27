@@ -8,7 +8,7 @@ Drop one config block into your host and your agent can query Magpie's protocol 
 
 ## What it exposes
 
-26 tools wrapping the x402 endpoints:
+40 tools wrapping the x402 endpoints:
 
 **Free reads (work out of the box):**
 - `magpie_pool_state` — live LendingPool account
@@ -31,14 +31,30 @@ Drop one config block into your host and your agent can query Magpie's protocol 
 **Paid (require a configured Solana keypair):**
 - `magpie_credit_score` — 0.001 SOL
 - `magpie_token_risk` — 0.001 SOL (per-token risk profile)
+- `magpie_credit_attest` — 0.0005 SOL (signed, portable credit attestation)
 - `magpie_build_borrow` — 0.005 SOL (pass `has_exit_arming: true` to route into the V4 in-vault-exit lane)
 - `magpie_build_repay` — 0.002 SOL
+- `magpie_build_extend` — 0.002 SOL (extend loan due date)
+- `magpie_build_topup` — 0.002 SOL (add collateral)
+- `magpie_build_partial_repay` — 0.002 SOL (pay down part of debt)
 - `magpie_build_deposit` — 0.002 SOL
 - `magpie_build_withdraw` — 0.002 SOL
 - `magpie_build_liquidate` — 0.003 SOL (liquidate a past-due loan, receive keeper bounty)
 - `magpie_create_intent` — 0.01 SOL (conditional borrow)
 - `magpie_get_intent` — 0.0005 SOL (poll)
+- `magpie_list_intents` — 0.001 SOL (list intents for a wallet)
 - `magpie_arm_exit` — 0.001 SOL (arm a self-owned in-vault TP / SL / trailing exit)
+- `magpie_limit_close_arm` — 0.001 SOL (delegated limit-close on another wallet's loan)
+
+**Free envelope-signed (require keypair for signature, no x402 charge):**
+- `magpie_cancel_intent` — cancel a pending conditional borrow intent
+- `magpie_limit_close_preflight` — preflight check for delegated arm
+- `magpie_limit_close_get` — read a specific delegated order
+- `magpie_limit_close_list` — list this agent's delegated orders
+- `magpie_limit_close_modify` — modify a delegated order in-place
+- `magpie_limit_close_cancel` — cancel a delegated order
+- `magpie_limit_close_delegations` — discover what this agent is authorized for
+- `magpie_limit_close_eligible_loans` — the agent's full actionable surface
 
 When a paid tool fires, the server signs an x402 payment tx locally with your configured keypair and forwards the signature to magpie-x402. The keypair never leaves your machine.
 
@@ -139,7 +155,7 @@ Use the same shape — point the host at `node /ABS/PATH/.../mcp/dist/index.js`,
 
 ## Free-only mode (no keypair)
 
-Omit `MAGPIE_MCP_PAYER_KEYPAIR` and the read-only free tools still work. Paid tools — and the envelope-signed exit tools (`magpie_arm_exit`, `magpie_modify_exit`, `magpie_cancel_exit`, which need the keypair to sign the envelope even though modify/cancel cost nothing) — return a clear error explaining that no payer is configured. Useful for read-only research agents or as a no-friction first install.
+Omit `MAGPIE_MCP_PAYER_KEYPAIR` and the read-only free tools still work. Paid tools — and the envelope-signed tools (`magpie_arm_exit`, `magpie_modify_exit`, `magpie_cancel_exit`, `magpie_cancel_intent`, and all `magpie_limit_close_*` management tools, which need the keypair to sign the envelope even though some cost nothing) — return a clear error explaining that no payer is configured. Useful for read-only research agents or as a no-friction first install.
 
 ## Environment variables
 

@@ -36,9 +36,9 @@ export interface PaidResult<T> {
 
 export async function call<T = unknown>(
   ctx: ClientCtx,
-  method: "GET" | "POST" | "DELETE",
+  method: "GET" | "POST" | "DELETE" | "PATCH",
   path: string,
-  init: { query?: Record<string, string>; body?: unknown } = {},
+  init: { query?: Record<string, string>; body?: unknown; headers?: Record<string, string> } = {},
 ): Promise<PaidResult<T>> {
   const url = new URL(path, ctx.baseUrl);
   for (const [k, v] of Object.entries(init.query ?? {})) {
@@ -47,6 +47,7 @@ export async function call<T = unknown>(
 
   const headers: Record<string, string> = { Accept: "application/json" };
   if (init.body !== undefined) headers["Content-Type"] = "application/json";
+  if (init.headers) Object.assign(headers, init.headers);
 
   const first = await fetch(url, {
     method,
