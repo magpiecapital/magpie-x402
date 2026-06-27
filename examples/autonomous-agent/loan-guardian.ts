@@ -297,8 +297,23 @@ export class LoanGuardian {
       }
 
       const liquid = await this.liquidLamports().catch(() => 0n);
-      if (liquid < this.repayReserveFor(loan)) {
-        crit(`under-funded to repay ${loan.loanId} (have ${liquid}, need ${this.repayReserveFor(loan)}). Retrying — do not let this go overdue.`);
+      const need = this.repayReserveFor(loan);
+      if (liquid < need) {
+        // UNDER-FUNDED: the build-repay tx will REVERT on-chain (insufficient
+        // lamports), so do NOT call the paid build-repay endpoint. Paying the
+        // 0.002-SOL x402 fee on a doomed repay only drains the wallet further —
+        // that death spiral is exactly what ate the borrowed reserve. Hold,
+        // alert the operator to fund the wallet, back off, and resume repaying
+        // the instant funds arrive. This NEVER abandons the loan.
+        crit(`under-funded to repay ${loan.loanId}: have ${liquid}, need ${need} (+gas). HOLDING — not paying for build-repay (would revert + burn the 0.002-SOL fee). Fund ${this.self.toBase58()} to resume.`);
+        if (attempt === 1 || attempt % 12 === 0) {
+          await this.notify?.send(
+            "error",
+            `x402 agent UNDER-FUNDED — paused to stop burning fees. Loan ${loan.loanId} needs ~${(Number(need) / 1e9).toFixed(3)} SOL to repay; wallet holds ${(Number(liquid) / 1e9).toFixed(4)} SOL. Send SOL to ${this.self.toBase58()} — it auto-repays + resumes borrowing.`,
+          );
+        }
+        await sleep(Math.min(300_000, 10_000 * attempt));
+        continue;
       }
 
       try {
