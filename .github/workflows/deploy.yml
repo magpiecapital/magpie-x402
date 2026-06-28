@@ -1,11 +1,16 @@
 name: Deploy to Vercel
 
 on:
-  push:
-    branches: [main]
-  # Lets the operator re-trigger a deploy without pushing — useful
-  # after a manual env-var change on Vercel that needs to take effect
-  # on the deployed bundle.
+  # AUTO-DEPLOY ON PUSH DISABLED 2026-06-27. The Vercel GitHub integration
+  # already deploys this repo on push (its "Vercel — Deployment has completed"
+  # check passes), making this workflow redundant — and its VERCEL_PROJECT_ID
+  # repo secret is stale, so `vercel pull` failed on EVERY push and emailed a
+  # failure each time. To re-enable: update the VERCEL_ORG_ID / VERCEL_PROJECT_ID
+  # / VERCEL_TOKEN repo secrets to the current Vercel project, then uncomment the
+  # push trigger below.
+  # push:
+  #   branches: [main]
+  # Manual re-trigger (also needs the VERCEL_* secrets fixed to actually succeed).
   workflow_dispatch:
 
 # Only one in-flight deploy at a time. If two pushes land back-to-back,
