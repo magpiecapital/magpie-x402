@@ -158,7 +158,7 @@ async function main() {
 async function runCycle(agent: MagpieAgent, guardian: LoanGuardian, notifier: Notifier) {
   // 1) BRAIN — Claude proposes a candidate from the allowed menu (or HOLD); the
   //    deterministic gates + guardian still have the final word.
-  const candidate = await chooseCandidate(agent, notifier);
+  const candidate = await chooseCandidate(agent, notifier, guardian);
   if (!candidate) {
     await notifier.send("hold", "No eligible candidate this cycle — holding (the safe default).");
     return;
@@ -271,7 +271,7 @@ interface Candidate {
 }
 
 /** Safe candidate selection: existing holdings + allowlist/open-universe, risk gated. */
-async function chooseCandidate(agent: MagpieAgent, notifier: Notifier): Promise<Candidate | null> {
+async function chooseCandidate(agent: MagpieAgent, notifier: Notifier, guardian: LoanGuardian): Promise<Candidate | null> {
   const { tokens } = await agent.collateralCatalog();
   const byMint = new Map(tokens.map((t) => [t.mint, t]));
 
@@ -307,6 +307,25 @@ async function chooseCandidate(agent: MagpieAgent, notifier: Notifier): Promise<
     buyPool = tokens.filter((t) => matches(t.category));
   } else {
     buyPool = []; // live + no allowlist + not open-universe → no fresh buys
+  }
+
+  // COST CONTROL (keep-costs-low) — if the wallet can't afford a fresh buy that
+  // clears the collateral floor, DROP the buy candidates so the brain must
+  // recycle a token the wallet ALREADY holds (no buy = ~free, just fees). This
+  // keeps the agent active + cheap on a small balance instead of burning every
+  // cycle trying to buy collateral it can't afford. Only kicks in when there's
+  // actually something held to recycle; otherwise the normal buy/skip path runs.
+  if (buyPool.length && heldCandidates.length) {
+    try {
+      const deployable = await guardian.deployableLamports();
+      let buyLamports = (deployable * 9n) / 10n;
+      if (cfg.maxBuyLamports > 0n && buyLamports > cfg.maxBuyLamports) buyLamports = cfg.maxBuyLamports;
+      const canAffordFreshBuy = cfg.minCollateralLamports <= 0n || buyLamports >= cfg.minCollateralLamports;
+      if (!canAffordFreshBuy) {
+        log(`COST — can't afford a fresh buy ≥ min collateral (${fmt(buyLamports)} < ${fmt(cfg.minCollateralLamports)} SOL); recycling held basket only this cycle (${heldCandidates.length} held).`);
+        buyPool = [];
+      }
+    } catch { /* if deployable can't be read, leave buys enabled (fail-open) */ }
   }
 
   // Held first (cheapest), then buy candidates; dedup by mint.
