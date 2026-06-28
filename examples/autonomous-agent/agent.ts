@@ -22,7 +22,7 @@ import bs58 from "bs58";
 import { MagpieAgent } from "@magpieloans/magpie-agent";
 import { loadConfig, loadKeySources } from "./config.js";
 import { LoanGuardian } from "./loan-guardian.js";
-import { jupiterBuy, jupiterValueInSol } from "./jupiter.js";
+import { jupiterBuy, jupiterSell, jupiterValueInSol } from "./jupiter.js";
 import { brainEnabled, chooseCandidateWithClaude, type MenuItem } from "./brain.js";
 import { getExistingCollateral } from "./holdings.js";
 import { Notifier } from "./notifier.js";
@@ -156,6 +156,23 @@ async function main() {
 }
 
 async function runCycle(agent: MagpieAgent, guardian: LoanGuardian, notifier: Notifier) {
+  // COST GUARD — if we're already at maxOpenLoans there is nothing to open this
+  // cycle, so SKIP the paid brain research (a Claude call + risk lookups) that
+  // safeBorrow would refuse anyway. The guardian keeps protecting the open loan
+  // independently (its repay + gas + fees are fully RESERVED, so the open loan
+  // can never go stale — no refuel needed while it's open). This also stops
+  // Anthropic/x402 spend from scaling with idle cycles.
+  if (guardian.openLoans().length >= cfg.maxOpenLoans) {
+    log(`HOLD — at max ${cfg.maxOpenLoans} open loan(s); skipping research (no spend) until a slot frees.`);
+    return;
+  }
+
+  // NEVER-STALE — a loan slot is FREE, so deployableLamports() here is true free
+  // SOL (no open-loan reserve to double-count). If it's too low to even open a
+  // recycle loan (borrow fee + gas), sell a held memecoin to top it up so the
+  // agent keeps cycling instead of idling (operator: "agents CANNOT go stale").
+  await maybeRefuel(agent, guardian, notifier);
+
   // 1) BRAIN — Claude proposes a candidate from the allowed menu (or HOLD); the
   //    deterministic gates + guardian still have the final word.
   const candidate = await chooseCandidate(agent, notifier, guardian);
@@ -260,6 +277,92 @@ async function runCycle(agent: MagpieAgent, guardian: LoanGuardian, notifier: No
   } else {
     log("DEPLOY — borrowed SOL held idle as repay reserve (no re-leverage). The guardian repays before the deadline.");
   }
+}
+
+/**
+ * NEVER-STALE refuel. Called ONLY when a loan slot is free (see runCycle), so
+ * deployableLamports() here is genuine free SOL — no open-loan reserve to
+ * double-count (an open loan's repay+gas+fees are already fully reserved and can
+ * never go stale). When that free SOL falls below cfg.minOperatingLamports, sell
+ * just enough of a held memecoin on Jupiter to reach cfg.refuelTargetLamports so
+ * the agent can keep opening recycle loans instead of idling. Tight top-up, not
+ * a basket dump (operator: "agents CANNOT go stale on too little SOL").
+ *
+ * Safety:
+ *  - Only sells tokens the WALLET HOLDS (getExistingCollateral reads wallet
+ *    balances) — an OPEN loan's collateral is locked in its vault and is NOT in
+ *    the wallet, so it can never be sold here.
+ *  - Sells the MINIMUM needed (deficit + small headroom), capped at one
+ *    position; picks the most-valuable/liquid holding for a clean fill.
+ *  - Memecoins only (the agent's whole universe is memecoins).
+ *  - Best-effort + fail-soft: never throws into the cycle; on no-route or
+ *    nothing-to-sell it DMs the operator that a top-up is needed.
+ */
+async function maybeRefuel(agent: MagpieAgent, guardian: LoanGuardian, notifier: Notifier): Promise<void> {
+  const floor = cfg.minOperatingLamports;
+  if (floor <= 0n) return;
+  let deployable: bigint;
+  try {
+    deployable = await guardian.deployableLamports();
+  } catch {
+    return; // can't tell — don't sell blindly
+  }
+  if (deployable >= floor) return; // healthy free-SOL buffer
+
+  const self = agent.publicKey();
+  if (!self) return;
+  let tokens: Awaited<ReturnType<MagpieAgent["collateralCatalog"]>>["tokens"];
+  let held: Awaited<ReturnType<typeof getExistingCollateral>>;
+  try {
+    tokens = (await agent.collateralCatalog()).tokens;
+    held = await getExistingCollateral(new Connection(cfg.rpcUrl, "confirmed"), self, tokens);
+  } catch (err) {
+    log(`REFUEL — could not read holdings: ${(err as Error).message}`);
+    return;
+  }
+  if (!held.length) {
+    await notifier.send("error", `⚠️ LOW SOL — free balance ${fmt(deployable)} below the ${fmt(floor)} operating floor and NOTHING held to sell. Top up SOL so the agent stays live.`);
+    return;
+  }
+
+  // Value every holding in SOL; sell the most valuable (most liquid) one.
+  const taker = self.toBase58();
+  const valued: Array<{ mint: string; symbol: string; amount: bigint; value: bigint }> = [];
+  for (const h of held) {
+    try {
+      const v = await jupiterValueInSol({ inputMint: h.mint, amountBaseUnits: BigInt(h.amount), taker });
+      if (v && v > 0n) valued.push({ mint: h.mint, symbol: h.symbol, amount: BigInt(h.amount), value: v });
+    } catch { /* unpriceable — skip */ }
+  }
+  if (!valued.length) {
+    await notifier.send("error", `⚠️ LOW SOL and held tokens are unpriceable on Jupiter — can't auto-refuel. Top up SOL.`);
+    return;
+  }
+  valued.sort((a, b) => (b.value > a.value ? 1 : b.value < a.value ? -1 : 0));
+  const pick = valued[0];
+
+  // Sell just enough to reach the target (deficit + 5% headroom), capped at the
+  // whole position — never dump the basket.
+  const target = cfg.refuelTargetLamports > floor ? cfg.refuelTargetLamports : floor * 6n;
+  const need = target - deployable; // > 0 here
+  const sellValue = need * 105n / 100n >= pick.value ? pick.value : (need * 105n) / 100n;
+  const sellAmount = sellValue >= pick.value ? pick.amount : (pick.amount * sellValue) / pick.value;
+  if (sellAmount <= 0n) return;
+
+  await notifier.send("info", `🔻 Auto-refuel: free SOL ${fmt(deployable)} < floor ${fmt(floor)}. Selling ~${fmt(sellValue)}◎ of held ${pick.symbol} so the agent stays live.`);
+  const sell = await jupiterSell({
+    payer: agentKeypair(),
+    inputMint: pick.mint,
+    amountBaseUnits: sellAmount,
+    rpcUrl: cfg.rpcUrl,
+    dryRun: cfg.dryRun,
+    slippageBps: 150,
+  });
+  if (!sell.ok) {
+    await notifier.send("warn", `Auto-refuel sell of ${pick.symbol} failed: ${sell.reason}. Retrying next cycle; top up if it persists.`);
+    return;
+  }
+  await notifier.send("buy", `✅ Refueled: sold ${pick.symbol} → +${fmt(sell.outLamports ?? 0n)}◎${sell.signature ? ` (tx ${sell.signature})` : ""}. Never-stale invariant holding.`);
 }
 
 interface Candidate {
