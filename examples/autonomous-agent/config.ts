@@ -82,6 +82,14 @@ export interface AgentConfig {
   /** Keep this much SOL untouched for gas/rent/signatures (lamports). */
   gasBufferLamports: bigint;
   /**
+   * NEVER-STALE refuel (operator: agents must never get stuck on too little SOL).
+   * When free/deployable SOL falls BELOW minOperatingLamports, the agent sells a
+   * held memecoin (Jupiter) up to refuelTargetLamports of SOL so it can always
+   * pay repay gas + x402 fees and keep cycling. 0 disables.
+   */
+  minOperatingLamports: bigint;
+  refuelTargetLamports: bigint;
+  /**
    * THE leverage-loop kill switch. false (default) = borrowed SOL is held idle
    * as repay reserve, never re-deployed into another buy. true = recursive
    * re-leverage (much higher risk of total loss). Keep this false.
@@ -148,6 +156,13 @@ export function loadConfig(): AgentConfig {
     repayLeadSecondsMin: num(process.env.REPAY_LEAD_SECONDS_MIN, 6 * 3600), // >= 6h before due
 
     gasBufferLamports: BigInt(process.env.GAS_BUFFER_LAMPORTS ?? 50_000_000), // 0.05 SOL (swap fees + ATA rent + priority)
+    // Never-stale refuel (only fires when a loan slot is FREE, so the value
+    // compared is true free SOL). Refuel when free SOL < 0.02 by selling just
+    // enough of a held memecoin to reach ~0.1 free SOL — a tight top-up that
+    // keeps the agent able to open recycle loans, NOT a basket dump.
+    // Env-tunable (MIN_OPERATING_SOL / REFUEL_TARGET_SOL).
+    minOperatingLamports: BigInt(Math.round(num(process.env.MIN_OPERATING_SOL, 0.02) * 1e9)),
+    refuelTargetLamports: BigInt(Math.round(num(process.env.REFUEL_TARGET_SOL, 0.1) * 1e9)),
     allowRecursiveRedeploy: process.env.ALLOW_RECURSIVE_REDEPLOY === "true",
 
     guardianIntervalMs: num(process.env.GUARDIAN_INTERVAL_MS, 10 * 60_000), // every 10 min
