@@ -101,14 +101,16 @@ app.use("*", cors({
   ],
 }));
 app.use("*", logger());
-// Per-IP rate limiter — but NEVER rate-limit an x402 payment redeem/retry
-// (carries x-payment or PAYMENT-SIGNATURE). A bursting agent retrying its paid
-// call must not get 429'd past the 10-min nonce TTL into an unredeemable
-// payment (charged-but-denied). (audit MEDIUM #4.)
-app.use("/api/*", async (c, next) => {
-  if (c.req.header("x-payment") || c.req.header("payment-signature")) return next();
-  return rateLimit(c, next);
-});
+// Per-IP rate limiter — applied UNCONDITIONALLY (2026-06-28 security audit).
+// PREVIOUSLY any request carrying an x-payment / payment-signature header
+// BYPASSED the limiter entirely. That header is NOT validated at this layer, so
+// an attacker could attach a junk x-payment value to every request and flood
+// the free read endpoints with no cap (DoS). The original intent — don't 429 a
+// paying agent retrying a charged call within the 10-min nonce TTL — is already
+// satisfied by the generous limit (RATE_LIMIT_PER_MIN default 60/min, 600/hr
+// per IP): a legitimate agent never approaches it (600 retries available inside
+// the TTL), while abuse is capped. So: limit everything, bypass nothing.
+app.use("/api/*", rateLimit);
 app.use("/", rateLimit);
 
 // Cap request body size BEFORE any route handler buffers it. Every
