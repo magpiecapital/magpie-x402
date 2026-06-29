@@ -29,6 +29,7 @@ import {
   type TradePosition,
 } from "./brain.js";
 import { cachedTokenRisk } from "./risk-cache.js";
+import { discoverTrenchCandidates, discoveryEnabled } from "./discovery.js";
 
 const log = (s: string) => console.log(`[trade] ${s}`);
 const fmt = (l: bigint) => (Number(l) / 1e9).toFixed(4);
@@ -158,10 +159,42 @@ export async function runTradeCycle(ctx: TradeCtx): Promise<void> {
   // 4) BRAIN — thesis sells + fresh buys on whatever survived the mechanical pass.
   const survivors = book.filter((m) => !sold.has(m.mint));
   const heldMints = new Set(holdings.map((h) => h.mint));
-  const candidates: TradeCandidate[] = catalog
+  const catalogCandidates: TradeCandidate[] = catalog
     .filter((t) => t.category === "memecoin" && !heldMints.has(t.mint))
     .slice(0, 25)
     .map((t) => ({ mint: t.mint, symbol: t.symbol, category: t.category }));
+
+  // Widen the funnel with freshly-DISCOVERED, gauntlet-vetted trench tokens
+  // (the "find good trench tokens" brain). discovery.ts has already enforced
+  // liquidity/volume/age + renounced authorities + sellability, so anything
+  // here is a vetted candidate — the trade engine still risk-gates, sizes,
+  // and stop-loss/take-profits it. Soft-fails to catalog-only on any error.
+  let discovered: TradeCandidate[] = [];
+  if (discoveryEnabled()) {
+    try {
+      const trench = await discoverTrenchCandidates(cfg);
+      discovered = trench.filter((t) => !heldMints.has(t.mint));
+      if (discovered.length) {
+        log(`DISCOVERY — ${discovered.length} vetted trench candidate(s): ${discovered.map((t) => t.symbol).join(", ")}`);
+        await notifier.send(
+          "info",
+          `🔭 Discovery surfaced ${discovered.length} vetted trench token(s): ${discovered.map((t) => t.symbol).join(", ")}`,
+        );
+      }
+    } catch (err) {
+      log(`DISCOVERY — failed (${(err as Error).message}); catalog-only this cycle.`);
+    }
+  }
+
+  // Merge catalog + discovered, dedup by mint, cap to keep the brain prompt tight.
+  const seenCand = new Set<string>();
+  const candidates: TradeCandidate[] = [];
+  for (const c of [...catalogCandidates, ...discovered]) {
+    if (seenCand.has(c.mint)) continue;
+    seenCand.add(c.mint);
+    candidates.push(c);
+  }
+  candidates.splice(30); // hard cap
 
   const openCount = survivors.filter((m) => (m.value ?? 0n) >= cfg.tradeMinPositionLamports).length;
   const roomForBuys = Math.max(0, cfg.maxPositions - openCount);
