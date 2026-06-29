@@ -172,7 +172,10 @@ export async function runTradeCycle(ctx: TradeCtx): Promise<void> {
   let discovered: TradeCandidate[] = [];
   if (discoveryEnabled()) {
     try {
-      const trench = await discoverTrenchCandidates(cfg);
+      // Bounded: per-request timeouts inside + a whole-stage ceiling here, so
+      // discovery can never stall the cycle (which, with the loop's re-entrancy
+      // guard, is what keeps cycles from ever overlapping on the wallet).
+      const trench = await withTimeout(discoverTrenchCandidates(cfg), NET_TIMEOUT_MS * 3, "discovery");
       discovered = trench.filter((t) => !heldMints.has(t.mint));
       if (discovered.length) {
         log(`DISCOVERY — ${discovered.length} vetted trench candidate(s): ${discovered.map((t) => t.symbol).join(", ")}`);
