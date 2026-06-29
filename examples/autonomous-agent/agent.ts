@@ -121,7 +121,20 @@ async function main() {
 
   // ── the continuous loop: research → maybe act → sleep → repeat ────────────
   let cycleNum = 0;
+  // RE-ENTRANCY GUARD — setInterval fires on a fixed cadence regardless of
+  // whether the prior cycle finished. A slow network stage (e.g. the discovery
+  // feed) could make a cycle run past the interval; without this guard the next
+  // tick would launch a SECOND concurrent runOne racing the same wallet —
+  // double-committing SOL and bypassing the per-cycle loan-cap / never-default
+  // reserve checks (both read live balance with no in-flight accounting). This
+  // caps concurrent cycles at exactly one; an overlapping tick is skipped.
+  let cycleRunning = false;
   const runOne = async () => {
+    if (cycleRunning) {
+      log(`Cycle skipped — previous cycle still running (no overlap).`);
+      return;
+    }
+    cycleRunning = true;
     cycleNum++;
     try {
       await notifier.send("cycle", `Cycle ${cycleNum} — researching…`);
@@ -135,6 +148,8 @@ async function main() {
       if (doesTrade) await runTradeCycle(tradeCtx);
     } catch (err) {
       await notifier.send("error", `Cycle ${cycleNum} errored (loop continues): ${(err as Error).message}`);
+    } finally {
+      cycleRunning = false;
     }
   };
 

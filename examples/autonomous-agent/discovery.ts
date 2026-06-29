@@ -94,13 +94,22 @@ export function discoveryEnabled(): boolean {
 
 async function dfetch(url: string): Promise<unknown | null> {
   try {
-    const r = await fetch(url, { headers: { accept: "application/json" } });
+    // Hard per-request timeout (matches jupiter.ts jfetch). Without it, one
+    // stalled DexScreener/Jupiter TCP connection would hang the whole agent
+    // cycle indefinitely — which (with the un-guarded setInterval) could let a
+    // second cycle start and race the wallet. Fail soft to null on any error.
+    const r = await fetch(url, {
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(8000),
+    });
     if (!r.ok) return null;
     return await r.json();
   } catch {
     return null;
   }
 }
+
+const TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 
 interface DexPair {
   chainId?: string;
@@ -139,17 +148,40 @@ async function bestPairFor(mint: string): Promise<DexPair | null> {
   return pairs[0];
 }
 
-/** On-chain: true ONLY if BOTH mint authority and freeze authority are renounced (null). */
-async function authoritiesRenounced(conn: Connection, mint: string): Promise<boolean> {
+/**
+ * On-chain mint safety. true ONLY if:
+ *   • mint authority AND freeze authority are both renounced (null), AND
+ *   • for Token-2022 mints, there is NO seize/block extension —
+ *     `permanentDelegate` (a fixed authority that can transfer/burn ANY
+ *     holder's balance → seizes the bought position with no sell/stop-loss) or
+ *     `transferHook` (a program that can make every sell silently fail →
+ *     traps the position with no exit). Renounced authorities alone do NOT
+ *     cover these, so a naive check would false-pass a seizable T22 token.
+ * Fail-closed everywhere: anything we can't prove safe is rejected.
+ */
+async function mintIsSafe(conn: Connection, mint: string): Promise<boolean> {
   try {
     const info = await conn.getParsedAccountInfo(new PublicKey(mint), "confirmed");
+    const owner = info.value?.owner?.toBase58();
     const parsed = (info.value?.data as { parsed?: { info?: Record<string, unknown> } } | undefined)?.parsed;
-    if (!parsed?.info) return false; // can't verify → reject (fail-closed)
+    if (!parsed?.info) return false; // can't verify → reject
     const mintAuth = parsed.info.mintAuthority;
     const freezeAuth = parsed.info.freezeAuthority;
-    return (mintAuth === null || mintAuth === undefined) && (freezeAuth === null || freezeAuth === undefined);
+    if (!((mintAuth === null || mintAuth === undefined) && (freezeAuth === null || freezeAuth === undefined))) {
+      return false;
+    }
+    if (owner === TOKEN_2022_PROGRAM) {
+      const exts = Array.isArray(parsed.info.extensions)
+        ? (parsed.info.extensions as Array<{ extension?: string }>)
+        : [];
+      for (const e of exts) {
+        const name = String(e?.extension ?? "");
+        if (name === "permanentDelegate" || name === "transferHook") return false; // seize / block-sell vectors
+      }
+    }
+    return true;
   } catch {
-    return false; // fail-closed: if we can't prove it's safe, it isn't a candidate
+    return false; // fail-closed
   }
 }
 
@@ -218,8 +250,8 @@ export async function discoverTrenchCandidates(cfg: AgentConfig): Promise<Discov
   const passed: DiscoveredToken[] = [];
   for (const { c, decimals } of shortlist) {
     if (passed.length >= d.maxCandidates) break;
-    const renounced = await authoritiesRenounced(conn, c.mint);
-    if (!renounced) continue;
+    const safe = await mintIsSafe(conn, c.mint);
+    if (!safe) continue;
     const sellable = await isSellable(c.mint, decimals);
     if (!sellable) continue;
     passed.push(c);
