@@ -56,6 +56,25 @@ operator through https://magpie.capital/security. We respond within
 We do not take legal action against researchers following
 responsible disclosure practices.
 
+## Audits in progress
+
+Magpie's smart-contract audit process is **actively underway**. Independent
+security firms have been **engaged to review** the protocol's on-chain lending
+programs; **reports will be published when complete**. The protocol is **not yet
+audited** — please do not treat the absence of a published report as a completed
+review.
+
+| Firm | Engagement status |
+| --- | --- |
+| **Sec3** | Repository access granted; review underway (formal scope being finalized). |
+| **Hashlock** | Invited (read-only access); engagement in progress. |
+| **QuillAudits** | Invited (read-only access); engagement in progress. |
+| **OtterSec** | Invited to audit; awaiting response. |
+
+The audit-target program, `magpiecapital/magpie-v4`, is kept **private** during
+pre-audit review, and every engaged firm is granted **read-only** access.
+Completed reports will be published at **https://github.com/magpiecapital/audits**.
+
 ## Defense in depth
 
 Patterns enforced in code:
