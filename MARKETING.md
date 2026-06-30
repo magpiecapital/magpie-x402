@@ -8,7 +8,13 @@ This is a living doc. PRs welcome.
 
 ## The one-liner
 
+**Collateral that can still sell itself.**
+
+Borrow SOL against your tokens — and set auto-sells on the same collateral. Liquidity, without giving up the upside.
+
 **Magpie is the first lending protocol an autonomous agent can drive end-to-end with no signup, no API key, and no custody** — it pays per call via x402, we hand back an *unsigned* transaction, and the agent signs and submits it itself (we never hold keys). Borrow against a memecoin, arm an in-vault take-profit / stop-loss on the loan, let it fire, repay — the whole leveraged-position lifecycle, agent-driven.
+
+Take-profit, stop-loss, ladders, trailing stops — they fire on-chain into your loan's vault, the loan stays open, and proceeds reach your wallet only when you repay. (Auto-sell exits are V4-only, on supported collateral — memecoins + tokenized stocks/RWAs — and fire through a slippage stack, never guaranteed fills.)
 
 > Every other x402 service on Solana is read-only token data or micro-credit to pay an API bill. Magpie is the only one gating the full **write-side leveraged-borrow lifecycle**. That combination — borrow + agent-set in-vault exit + zero-custody + x402-permissionless — is the defensible, currently-unclaimed category: **agent-native leverage.**
 

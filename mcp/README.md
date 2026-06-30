@@ -1,6 +1,12 @@
 # magpie-mcp
 
+## Collateral that can still sell itself.
+
+Borrow SOL against your tokens — and set auto-sells on the same collateral. Liquidity, without giving up the upside.
+
 **MCP server exposing the Magpie Capital x402 API as native tools for Claude Desktop, Cursor, Windsurf, ChatGPT desktop, and any other MCP-aware agent host.**
+
+Take-profit, stop-loss, ladders, trailing stops — they fire on-chain into your loan's vault, the loan stays open, and proceeds reach your wallet only when you repay. Auto-sell exits are V4 in-vault orders on supported collateral (memecoins + tokenized stocks/RWAs); they are auto-sell orders that fire on-chain through a slippage stack, not guaranteed fills.
 
 Drop one config block into your host and your agent can query Magpie's protocol state, simulate borrows, fetch credit scores, build deposit/withdraw transactions, post conditional borrow intents, and arm self-owned in-vault take-profit / stop-loss exits on its own loans — all as first-class tool calls. No bespoke client code, no API keys.
 
