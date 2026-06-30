@@ -1,8 +1,8 @@
 # magpie-x402
 
-## Collateral that can still sell itself.
+## Solana lending protocol — liquidity without selling your bag.
 
-Borrow SOL against your tokens — and set auto-sells on the same collateral. Liquidity, without giving up the upside.
+Borrow SOL against your memecoins, tokenized stocks, and RWAs — and set take-profits and stops on that same collateral. Liquidity now, upside intact: collateral that can still sell itself.
 
 **x402 payment-required API endpoints for the [Magpie Capital](https://magpie.capital) protocol.** AI agents and other Solana protocols can pay-per-call for credit scores, token risk assessments, and protocol analytics — no API keys, no signups, just a Solana payment. Agents borrow programmatically: pay per call, get back an *unsigned* Solana transaction, sign and submit it yourself (the service holds zero keys).
 
