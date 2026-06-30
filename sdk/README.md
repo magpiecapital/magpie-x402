@@ -1,8 +1,14 @@
 # @magpieloans/magpie-agent
 
+## Collateral that can still sell itself.
+
+Borrow SOL against your tokens — and set auto-sells on the same collateral. Liquidity, without giving up the upside.
+
 **The agent SDK for Magpie x402.** Every action on the Magpie permissionless lending protocol as a typed one-liner.
 
-The first x402-native lending SDK on Solana. Agents borrow, lend, liquidate, and post conditional intents in one line of code each. No HTTP plumbing, no signature handling, no transaction construction.
+The first x402-native lending SDK on Solana. Agents borrow programmatically, lend, liquidate, and post conditional intents in one line of code each. No HTTP plumbing, no signature handling, no transaction construction.
+
+Take-profit, stop-loss, ladders, trailing stops — they fire on-chain into your loan's vault, the loan stays open, and proceeds reach your wallet only when you repay. Auto-sell exits are V4 in-vault orders on supported collateral (memecoins + tokenized stocks/RWAs); they are auto-sell orders that fire on-chain through a slippage stack, not guaranteed fills.
 
 > A share of Magpie protocol fees accrues to a **$MAGPIE** holder-rewards pool, paid pro-rata in SOL (no staking, no lockup). 70% is the governance-ratified (MGP-001) target allocation; distributions run on a governance cadence. x402 call fees feed the same holder-rewards economics — agent adoption grows the fees that reward holders.
 

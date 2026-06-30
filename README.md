@@ -1,6 +1,12 @@
 # magpie-x402
 
-**x402 payment-required API endpoints for the [Magpie Capital](https://magpie.capital) protocol.** AI agents and other Solana protocols can pay-per-call for credit scores, token risk assessments, and protocol analytics — no API keys, no signups, just a Solana payment.
+## Collateral that can still sell itself.
+
+Borrow SOL against your tokens — and set auto-sells on the same collateral. Liquidity, without giving up the upside.
+
+**x402 payment-required API endpoints for the [Magpie Capital](https://magpie.capital) protocol.** AI agents and other Solana protocols can pay-per-call for credit scores, token risk assessments, and protocol analytics — no API keys, no signups, just a Solana payment. Agents borrow programmatically: pay per call, get back an *unsigned* Solana transaction, sign and submit it yourself (the service holds zero keys).
+
+Take-profit, stop-loss, ladders, trailing stops — they fire on-chain into your loan's vault, the loan stays open, and proceeds reach your wallet only when you repay. Auto-sell exits are V4 in-vault orders on supported collateral (memecoins + tokenized stocks/RWAs); they are auto-sell orders that fire on-chain through a slippage stack, not guaranteed fills.
 
 ```
                         AI agent
