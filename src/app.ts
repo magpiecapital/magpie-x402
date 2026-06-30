@@ -136,9 +136,10 @@ app.get("/", (c) =>
   c.json({
     name: "magpie-x402",
     version: "0.1.0",
-    slogan: "Collateral that can still sell itself.",
+    category: "Solana lending protocol",
+    slogan: "Liquidity without selling your bag.",
     explainer:
-      "Borrow SOL against your tokens — and set auto-sells on the same collateral. Liquidity, without giving up the upside.",
+      "Borrow SOL against your memecoins, tokenized stocks, and RWAs — and set take-profits and stops on that same collateral. Liquidity now, upside intact: collateral that can still sell itself.",
     mechanic:
       "Take-profit, stop-loss, ladders, trailing stops — they fire on-chain into your loan's vault, the loan stays open, and proceeds reach your wallet only when you repay.",
     tagline:
@@ -231,9 +232,9 @@ app.get("/health", (c) => c.json({ ok: true, ts: new Date().toISOString() }));
 // + OpenAPI but in the llms.txt convention many agent hosts now read.
 const LLMS_TXT = `# Magpie x402 — Agent Lending on Solana
 
-> Collateral that can still sell itself.
-> Borrow SOL against your tokens — and set auto-sells on the same collateral.
-> Liquidity, without giving up the upside.
+> Solana lending protocol — liquidity without selling your bag.
+> Borrow SOL against your memecoins, tokenized stocks, and RWAs — and set
+> take-profits and stops on that same collateral. Collateral that can still sell itself.
 >
 > Permissionless agent lending on Solana over x402 (HTTP 402, pay-per-call).
 > No signup. No API key. ZERO custody — the service holds no keys; your agent
@@ -360,7 +361,7 @@ app.get("/openapi.json", (c) => c.json({
     title: "Magpie x402 API — agent-native lending on Solana",
     version: "0.1.0",
     description:
-      "Collateral that can still sell itself. Borrow SOL against your tokens — and set auto-sells on the same collateral. Liquidity, without giving up the upside. The first lending protocol an autonomous agent can drive end-to-end (no signup, no API key, no custody). Borrow SOL against memecoins (V1) or tokenized RWAs (V3), arm in-vault take-profit / stop-loss exit orders on your own loan (V4), and repay — all permissionlessly via Solana-native x402 payments. Auto-sell exits fire on-chain into your loan's vault, the loan stays open, and proceeds reach your wallet only when you repay (V4-only, supported collateral, through a slippage stack — not guaranteed fills). The service holds no keys: it returns unsigned txs you sign yourself. SDK: @magpieloans/magpie-agent · MCP: @magpieloans/magpie-mcp.",
+      "Magpie is a Solana lending protocol: liquidity without selling your bag. Borrow SOL against your memecoins, tokenized stocks, and RWAs — and set take-profits and stops on that same collateral; collateral that can still sell itself. The first lending protocol an autonomous agent can drive end-to-end (no signup, no API key, no custody). Borrow SOL against memecoins (V1) or tokenized RWAs (V3), arm in-vault take-profit / stop-loss exit orders on your own loan (V4), and repay — all permissionlessly via Solana-native x402 payments. Auto-sell exits fire on-chain into your loan's vault, the loan stays open, and proceeds reach your wallet only when you repay (V4-only, supported collateral, through a slippage stack — not guaranteed fills). The service holds no keys: it returns unsigned txs you sign yourself. SDK: @magpieloans/magpie-agent · MCP: @magpieloans/magpie-mcp.",
     license: { name: "MIT", identifier: "MIT" },
     contact: { url: "https://github.com/magpiecapital/magpie-x402/issues" },
   },
@@ -657,7 +658,7 @@ app.get("/.well-known/x402.json", (c) =>
     scheme: "x402/solana/v1",
     name: "Magpie — agent-native lending on Solana",
     description:
-      "Collateral that can still sell itself. Borrow SOL against your tokens — and set auto-sells on the same collateral. Liquidity, without giving up the upside. The first lending protocol an autonomous agent drives end-to-end, no custody: borrow against memecoins (V1) or RWAs (V3), arm in-vault TP/SL exit orders on your own loan (V4), repay. Auto-sell exits fire on-chain into your loan's vault, the loan stays open, and proceeds reach your wallet only when you repay (V4-only, supported collateral, through a slippage stack). Pay per call via x402; get back unsigned txs you sign yourself.",
+      "Magpie is a Solana lending protocol: liquidity without selling your bag. Borrow SOL against your memecoins, tokenized stocks, and RWAs — and set take-profits and stops on that same collateral; collateral that can still sell itself. The first lending protocol an autonomous agent drives end-to-end, no custody: borrow against memecoins (V1) or RWAs (V3), arm in-vault TP/SL exit orders on your own loan (V4), repay. Auto-sell exits fire on-chain into your loan's vault, the loan stays open, and proceeds reach your wallet only when you repay (V4-only, supported collateral, through a slippage stack). Pay per call via x402; get back unsigned txs you sign yourself.",
     docs: "https://github.com/magpiecapital/magpie-x402#readme",
     sdk: "@magpieloans/magpie-agent",
     mcp: "@magpieloans/magpie-mcp",

@@ -8,9 +8,9 @@ This is a living doc. PRs welcome.
 
 ## The one-liner
 
-**Collateral that can still sell itself.**
+**Solana lending protocol — liquidity without selling your bag.**
 
-Borrow SOL against your tokens — and set auto-sells on the same collateral. Liquidity, without giving up the upside.
+Borrow SOL against your memecoins, tokenized stocks, and RWAs — and set take-profits and stops on that same collateral. Liquidity now, upside intact: collateral that can still sell itself.
 
 **Magpie is the first lending protocol an autonomous agent can drive end-to-end with no signup, no API key, and no custody** — it pays per call via x402, we hand back an *unsigned* transaction, and the agent signs and submits it itself (we never hold keys). Borrow against a memecoin, arm an in-vault take-profit / stop-loss on the loan, let it fire, repay — the whole leveraged-position lifecycle, agent-driven.
 

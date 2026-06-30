@@ -1,8 +1,8 @@
 # magpie-mcp
 
-## Collateral that can still sell itself.
+## Solana lending protocol — liquidity without selling your bag.
 
-Borrow SOL against your tokens — and set auto-sells on the same collateral. Liquidity, without giving up the upside.
+Borrow SOL against your memecoins, tokenized stocks, and RWAs — and set take-profits and stops on that same collateral. Liquidity now, upside intact: collateral that can still sell itself.
 
 **MCP server exposing the Magpie Capital x402 API as native tools for Claude Desktop, Cursor, Windsurf, ChatGPT desktop, and any other MCP-aware agent host.**
 
