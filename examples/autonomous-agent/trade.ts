@@ -237,14 +237,27 @@ export async function runTradeCycle(ctx: TradeCtx): Promise<void> {
 
   // 5b) fresh buys — sized, solvency-bounded, risk-gated, position-capped.
   let openNow = openCount - [...sold].filter((mt) => survivors.some((s) => s.mint === mt)).length;
+  // A NEW position must be at least HALF the base size. tradeMinPositionLamports is a
+  // dust/valuation threshold for marking positions to market — NOT an opening floor.
+  // Opening below this = entry+exit slippage/fees for negligible exposure, and lets one
+  // high-conviction buy drain the book into dust follow-ons. Gate on this before any
+  // paid risk lookup so a near-empty wallet never burns fees it can't act on.
+  const minOpenLamports =
+    cfg.tradePositionLamports / 2n > cfg.tradeMinPositionLamports
+      ? cfg.tradePositionLamports / 2n
+      : cfg.tradeMinPositionLamports;
   for (const mint of brainBuys) {
     if (openNow >= cfg.maxPositions) {
       log(`BUY skipped — at maxPositions (${cfg.maxPositions}).`);
       break;
     }
     const free = await freeLamports(ctx);
-    if (free < cfg.tradeMinPositionLamports) {
-      log(`BUY skipped — free ${fmt(free)}◎ < min position ${fmt(cfg.tradeMinPositionLamports)}◎.`);
+    const capByFree = (free * 9n) / 10n; // never spend >90% of free (gas headroom)
+    // Can we fund a real (>= half) position? If not, STOP — free only drops from here,
+    // so break rather than spin, and do it BEFORE the paid risk lookup so a near-empty
+    // wallet never burns fees on assessments it can't act on.
+    if (capByFree < minOpenLamports) {
+      log(`BUY loop stop — free ${fmt(free)}◎ can't fund a real position (min ${fmt(minOpenLamports)}◎).`);
       break;
     }
     const cand = candidates.find((c) => c.mint === mint);
@@ -266,16 +279,17 @@ export async function runTradeCycle(ctx: TradeCtx): Promise<void> {
     }
 
     // SIZE — brain conviction multiplier (0.5 = half-size probe … 2.0 = high-conviction
-    // lean-in) on the base position, bounded to 90% of free SOL (gas headroom) + MAX_BUY,
-    // floored at the dust minimum. Varies trade size by conviction, not a flat amount.
+    // lean-in) on the base position, bounded to 90% of free SOL (gas headroom) + MAX_BUY.
+    // Guaranteed >= minOpenLamports (mult >= 0.5 and capByFree >= minOpen), so no dust fills.
     const mult = Math.max(0.5, Math.min(2, brainSizings[mint] ?? 1));
     let spend = BigInt(Math.round(Number(cfg.tradePositionLamports) * mult));
-    const capByFree = (free * 9n) / 10n;
     if (spend > capByFree) spend = capByFree;
     if (cfg.maxBuyLamports > 0n && spend > cfg.maxBuyLamports) spend = cfg.maxBuyLamports;
-    if (spend < cfg.tradeMinPositionLamports) {
-      log(`BUY ${sym} skipped — conviction-sized ${fmt(spend)}◎ below min ${fmt(cfg.tradeMinPositionLamports)}◎.`);
-      continue;
+    if (spend < minOpenLamports) {
+      // Only reachable if MAX_BUY is set below half a position (a config contradiction the
+      // boot guard warns about). Break — no later buy can clear it either.
+      log(`BUY ${sym} stop — sized ${fmt(spend)}◎ below the open floor ${fmt(minOpenLamports)}◎ (MAX_BUY too low?).`);
+      break;
     }
     log(`BUY — ${sym}: conviction ${mult.toFixed(2)}× → deploying ${fmt(spend)}◎.`);
     const buy = await jupiterBuy({

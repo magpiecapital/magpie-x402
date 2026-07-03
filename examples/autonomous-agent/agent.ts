@@ -212,22 +212,36 @@ async function runCycle(agent: MagpieAgent, guardian: LoanGuardian, notifier: No
     // at ~the same figure. It never exceeds deployable×0.95, so the repay reserve +
     // gas headroom is always preserved regardless of what the brain asked for.
     const sizeFrac = Math.max(0.4, Math.min(0.95, candidate.sizeFraction ?? 0.9));
+    const ceilingLamports = (deployable * 95n) / 100n; // never spend more than 95% of deployable
     let buyLamports = (deployable * BigInt(Math.round(sizeFrac * 1000))) / 1000n;
+    // FLOOR-UP — a low conviction fraction must SHRINK the loan, never KILL it. If the
+    // conviction size lands below the min viable loan but the wallet can still afford
+    // that min (within 95% of deployable), size UP to the min instead of skipping the
+    // whole cycle. Only when even the min is unaffordable do we fall through to the skip
+    // below. This also reconciles the cost-control probe in chooseCandidate (which uses
+    // 0.9): if it kept fresh-buy candidates, the wallet can afford >= min here, so a
+    // brain "probe" at 0.4 no longer produces a self-inflicted no-op borrow cycle.
+    if (
+      cfg.minCollateralLamports > 0n &&
+      buyLamports < cfg.minCollateralLamports &&
+      cfg.minCollateralLamports <= ceilingLamports
+    ) {
+      log(`SIZE — brain conviction ${(sizeFrac * 100) | 0}% would fall below the ${fmt(cfg.minCollateralLamports)} SOL min loan; flooring up to the minimum so the cycle still opens a loan.`);
+      buyLamports = cfg.minCollateralLamports;
+    }
     if (cfg.maxBuyLamports > 0n && buyLamports > cfg.maxBuyLamports) buyLamports = cfg.maxBuyLamports;
     log(`SOLVENCY — deployable ${fmt(deployable)} SOL; sizing ${(sizeFrac * 100) | 0}% (brain conviction) → buy with ${fmt(buyLamports)} SOL (reserve + gas held back).`);
     if (buyLamports <= 0n) {
       await notifier.send("hold", "Nothing deployable while keeping repay reserves — holding (never-default invariant doing its job).");
       return;
     }
-    // PRE-BUY FLOOR — if we can't even buy MIN_COLLATERAL worth, the post-buy
-    // gate below would skip the borrow anyway, leaving us holding a token we
-    // can't collateralize. Slippage only LOWERS the resale value, so
-    // buyLamports < floor guarantees the bought collateral lands below it.
-    // Skip the cycle instead of spending SOL (+ slippage) on un-borrowable dust.
+    // PRE-BUY FLOOR — reached only when even the MIN loan is unaffordable (deployable
+    // too small to floor up above). Keeps the guard against paying a build-borrow fee
+    // on collateral too small to borrow against.
     if (cfg.minCollateralLamports > 0n && buyLamports < cfg.minCollateralLamports) {
       await notifier.send(
         "hold",
-        `Skipping buy of ${candidate.symbol}: deployable ${fmt(buyLamports)} SOL is below the ${fmt(cfg.minCollateralLamports)} SOL ` +
+        `Skipping buy of ${candidate.symbol}: deployable ${fmt(deployable)} SOL can't fund the ${fmt(cfg.minCollateralLamports)} SOL ` +
           `collateral minimum — won't buy collateral too small to borrow against. Fund the wallet for larger/continuous loans.`,
       );
       return;
