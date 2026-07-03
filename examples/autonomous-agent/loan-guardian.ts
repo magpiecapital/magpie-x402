@@ -154,20 +154,25 @@ export class LoanGuardian {
   async safeBorrow(opts: {
     collateralMint: string;
     collateralAmount: bigint | string;
+    /** Per-loan term chosen by the brain; falls back to the config default when absent. */
+    tier?: "express" | "quick" | "standard";
   }): Promise<NLoan | null> {
     if (this.tracked.size >= this.cfg.maxOpenLoans) {
       log(`refusing borrow — already at maxOpenLoans (${this.cfg.maxOpenLoans}).`);
       return null;
     }
+    // The guardian repays off each loan's REAL on-chain deadline (see leadSeconds),
+    // so a varied per-loan term is safe — it never changes when we repay relative to due.
+    const tier = opts.tier ?? this.cfg.tier;
     if (this.cfg.dryRun) {
-      log(`DRY RUN — would borrow ${this.cfg.tier} against ${opts.collateralMint} and register it for never-default tracking.`);
+      log(`DRY RUN — would borrow ${tier} against ${opts.collateralMint} and register it for never-default tracking.`);
       return null;
     }
 
     const res = await this.agent.borrow({
       collateralMint: opts.collateralMint,
       collateralAmount: opts.collateralAmount,
-      tier: this.cfg.tier,
+      tier,
     });
     log(`borrowed loan ${res.loanId} (${res.borrowedLamports} lamports received).`);
 
