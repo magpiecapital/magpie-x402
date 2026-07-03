@@ -207,9 +207,14 @@ async function runCycle(agent: MagpieAgent, guardian: LoanGuardian, notifier: No
   } else {
     // SOLVENCY — only ever spend what the guardian says is free (never the reserve).
     const deployable = await guardian.deployableLamports();
-    let buyLamports = (deployable * 9n) / 10n; // keep 10% headroom on top of the reserve
+    // SIZE — the brain's conviction fraction (0.4..0.95) of deployable; default 0.9.
+    // This is what makes loan sizes VARY by conviction instead of every loan landing
+    // at ~the same figure. It never exceeds deployable×0.95, so the repay reserve +
+    // gas headroom is always preserved regardless of what the brain asked for.
+    const sizeFrac = Math.max(0.4, Math.min(0.95, candidate.sizeFraction ?? 0.9));
+    let buyLamports = (deployable * BigInt(Math.round(sizeFrac * 1000))) / 1000n;
     if (cfg.maxBuyLamports > 0n && buyLamports > cfg.maxBuyLamports) buyLamports = cfg.maxBuyLamports;
-    log(`SOLVENCY — deployable ${fmt(deployable)} SOL; will buy with ${fmt(buyLamports)} SOL (reserve + gas held back).`);
+    log(`SOLVENCY — deployable ${fmt(deployable)} SOL; sizing ${(sizeFrac * 100) | 0}% (brain conviction) → buy with ${fmt(buyLamports)} SOL (reserve + gas held back).`);
     if (buyLamports <= 0n) {
       await notifier.send("hold", "Nothing deployable while keeping repay reserves — holding (never-default invariant doing its job).");
       return;
@@ -280,7 +285,7 @@ async function runCycle(agent: MagpieAgent, guardian: LoanGuardian, notifier: No
   // 3) COLLATERALIZE on Magpie — only through safeBorrow, which refuses if it
   //    can't honor the resulting deadline, registers the loan + reserve, and
   //    DMs the borrow. The guardian then repays it (via repay.ts) well early.
-  await guardian.safeBorrow({ collateralMint: candidate.mint, collateralAmount });
+  await guardian.safeBorrow({ collateralMint: candidate.mint, collateralAmount, tier: candidate.tier });
 
   // NOTE: in-vault exit arming (TP/SL) is NOT in the published SDK (0.1.x), so
   // this agent does not arm exits — by design, the GUARDIAN (never a stop-loss)
@@ -386,6 +391,10 @@ interface Candidate {
   category: string;
   /** Raw u64 collateral amount when the wallet ALREADY holds this (no buy needed). */
   existingAmount?: string;
+  /** Brain-chosen loan term for THIS loan (undefined => config default cfg.tier). */
+  tier?: "express" | "quick" | "standard";
+  /** Brain-chosen sizing conviction 0.4..0.95 of deployable (undefined => default 0.9). Buy path only. */
+  sizeFraction?: number;
 }
 
 /** Safe candidate selection: existing holdings + allowlist/open-universe, risk gated. */
@@ -471,11 +480,16 @@ async function chooseCandidate(agent: MagpieAgent, notifier: Notifier, guardian:
   // BRAIN — Claude proposes from the (variety-filtered) menu and may say HOLD; on
   // any failure or no key, fall back to the deterministic first pick (held-first).
   let pick = menu[0];
+  let brainTier: Candidate["tier"];
+  let brainSize: number | undefined;
   if (brainEnabled()) {
     try {
       const decision = await chooseCandidateWithClaude(agent, cfg, menu);
-      log(`BRAIN(Claude) — ${decision.action.toUpperCase()}${decision.symbol ? " " + decision.symbol : ""} · conf ${decision.confidence.toFixed(2)} · ${decision.reasoning}`);
-      await notifier.send("brain", `Claude: ${decision.action.toUpperCase()}${decision.symbol ? " " + decision.symbol : ""} (conf ${decision.confidence.toFixed(2)}) — ${decision.reasoning}`);
+      const plan =
+        (decision.tier ? ` · ${decision.tier}` : "") +
+        (decision.sizeFraction != null ? ` · size ${decision.sizeFraction.toFixed(2)}` : "");
+      log(`BRAIN(Claude) — ${decision.action.toUpperCase()}${decision.symbol ? " " + decision.symbol : ""}${plan} · conf ${decision.confidence.toFixed(2)} · ${decision.reasoning}`);
+      await notifier.send("brain", `Claude: ${decision.action.toUpperCase()}${decision.symbol ? " " + decision.symbol : ""}${plan} (conf ${decision.confidence.toFixed(2)}) — ${decision.reasoning}`);
       if (decision.action !== "buy" || !decision.mint) return null; // HOLD is a valid, safe outcome
       const chosen = menu.find((t) => t.mint === decision.mint);
       if (!chosen) {
@@ -483,6 +497,8 @@ async function chooseCandidate(agent: MagpieAgent, notifier: Notifier, guardian:
         return null;
       }
       pick = chosen;
+      brainTier = decision.tier;
+      brainSize = decision.sizeFraction;
     } catch (err) {
       log(`BRAIN — Claude unavailable (${(err as Error).message}); using deterministic pick.`);
     }
@@ -506,7 +522,7 @@ async function chooseCandidate(agent: MagpieAgent, notifier: Notifier, guardian:
   // Remember this cycle's collateral so the next cycle rotates off it (bounded ring).
   recentCollateral.push(pick.mint);
   if (recentCollateral.length > 16) recentCollateral.shift();
-  return { mint: pick.mint, symbol: pick.symbol, category: pick.category, existingAmount: heldMap.get(pick.mint) };
+  return { mint: pick.mint, symbol: pick.symbol, category: pick.category, existingAmount: heldMap.get(pick.mint), tier: brainTier, sizeFraction: brainSize };
 }
 
 // The SDK keeps the keypair private; for the Jupiter leg we need to sign

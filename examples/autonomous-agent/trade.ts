@@ -204,6 +204,7 @@ export async function runTradeCycle(ctx: TradeCtx): Promise<void> {
 
   let brainSells: string[] = [];
   let brainBuys: string[] = [];
+  let brainSizings: Record<string, number> = {};
   if (brainEnabled() && (survivors.length || (candidates.length && roomForBuys > 0))) {
     try {
       const positionsForBrain: TradePosition[] = survivors.map((m) => ({
@@ -217,6 +218,7 @@ export async function runTradeCycle(ctx: TradeCtx): Promise<void> {
       const d = await decideTradesWithClaude(agent, cfg, positionsForBrain, candidates, roomForBuys);
       brainSells = d.sells;
       brainBuys = d.buys;
+      brainSizings = d.sizings ?? {};
       log(`BRAIN — sell [${brainSells.map((x) => x.slice(0, 4)).join(",")}] buy [${brainBuys.map((x) => x.slice(0, 4)).join(",")}] · conf ${d.confidence.toFixed(2)} · ${d.reasoning}`);
       await notifier.send("brain", `Trade brain (conf ${d.confidence.toFixed(2)}): sell ${brainSells.length}, buy ${brainBuys.length} — ${d.reasoning}`);
     } catch (err) {
@@ -241,8 +243,8 @@ export async function runTradeCycle(ctx: TradeCtx): Promise<void> {
       break;
     }
     const free = await freeLamports(ctx);
-    if (free < cfg.tradePositionLamports) {
-      log(`BUY skipped — free ${fmt(free)}◎ < position size ${fmt(cfg.tradePositionLamports)}◎.`);
+    if (free < cfg.tradeMinPositionLamports) {
+      log(`BUY skipped — free ${fmt(free)}◎ < min position ${fmt(cfg.tradeMinPositionLamports)}◎.`);
       break;
     }
     const cand = candidates.find((c) => c.mint === mint);
@@ -263,8 +265,19 @@ export async function runTradeCycle(ctx: TradeCtx): Promise<void> {
       }
     }
 
-    const spend = cfg.tradePositionLamports;
-    log(`BUY — ${sym}: deploying ${fmt(spend)}◎.`);
+    // SIZE — brain conviction multiplier (0.5 = half-size probe … 2.0 = high-conviction
+    // lean-in) on the base position, bounded to 90% of free SOL (gas headroom) + MAX_BUY,
+    // floored at the dust minimum. Varies trade size by conviction, not a flat amount.
+    const mult = Math.max(0.5, Math.min(2, brainSizings[mint] ?? 1));
+    let spend = BigInt(Math.round(Number(cfg.tradePositionLamports) * mult));
+    const capByFree = (free * 9n) / 10n;
+    if (spend > capByFree) spend = capByFree;
+    if (cfg.maxBuyLamports > 0n && spend > cfg.maxBuyLamports) spend = cfg.maxBuyLamports;
+    if (spend < cfg.tradeMinPositionLamports) {
+      log(`BUY ${sym} skipped — conviction-sized ${fmt(spend)}◎ below min ${fmt(cfg.tradeMinPositionLamports)}◎.`);
+      continue;
+    }
+    log(`BUY — ${sym}: conviction ${mult.toFixed(2)}× → deploying ${fmt(spend)}◎.`);
     const buy = await jupiterBuy({
       payer: keypair,
       outputMint: mint,

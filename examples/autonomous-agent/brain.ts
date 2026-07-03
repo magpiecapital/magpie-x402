@@ -30,6 +30,15 @@ export interface BrainDecision {
   symbol?: string;
   reasoning: string;
   confidence: number; // 0..1
+  /** Loan TERM the brain chose for THIS loan. Clamped to a valid tier by the caller; undefined => config default. */
+  tier?: "express" | "quick" | "standard";
+  /**
+   * Sizing CONVICTION 0.4..0.95 — the fraction of deployable capital to put behind
+   * THIS pick. Lets the brain probe small on speculative ideas and lean in on strong
+   * ones instead of deploying a fixed amount every cycle. Clamped by the caller;
+   * undefined => the caller's default fraction.
+   */
+  sizeFraction?: number;
 }
 
 const MODEL = process.env.MAGPIE_BRAIN_MODEL ?? "claude-sonnet-4-6";
@@ -61,6 +70,17 @@ const TOOLS = [
       properties: {
         action: { type: "string", enum: ["buy", "hold"] },
         mint: { type: "string", description: "chosen mint from the allowed menu (required when action=buy)" },
+        term: {
+          type: "string",
+          enum: ["express", "quick", "standard"],
+          description:
+            "Loan TERM to match your thesis: express=2 days (fast momentum / tight setup), quick=3 days (medium), standard=7 days (needs room, or a steadier RWA). VARY this across loans — pick the term the thesis actually needs, don't default to one.",
+        },
+        size: {
+          type: "number",
+          description:
+            "Sizing CONVICTION from 0.4 to 0.95 — the fraction of available capital to deploy on THIS pick. 0.4-0.55 = small probe on a speculative idea, 0.7-0.8 = solid setup, 0.9-0.95 = high-conviction, lean in. Match size to how strong the setup is; don't deploy the same amount every time.",
+        },
         reasoning: { type: "string" },
         confidence: { type: "number", description: "0..1" },
       },
@@ -135,7 +155,11 @@ function taskPrompt(cfg: AgentConfig, menu: MenuItem[]): string {
     "ALLOWED MENU — you may ONLY pick a mint from this list; anything else is rejected:",
     list,
     "",
-    "DIVERSIFY — do NOT keep recycling the same few collateral assets cycle after cycle. Actively pick a DIFFERENT, high-quality asset than your recent picks to show real breadth across the supported universe. Buying FRESH collateral is expected and encouraged whenever you have the capital to clear the minimum loan size; rotate through a variety of strong names rather than defaulting to whatever is already in the wallet. Fall back to an ALREADY HELD asset ONLY when capital is too tight to buy a fresh one. Breadth and variety matter more than saving a small buy fee.",
+    "THINK OUTSIDE THE BOX — a monotonous stream of near-identical loans (same asset, same size, same term) is a FAILURE. On every axis, show range and intent:",
+    "  • ASSET: pick a DIFFERENT, high-quality name than your recent picks — real breadth across the supported universe (memecoins AND tokenized stocks/RWAs where allowed). Buying FRESH collateral is expected whenever you have capital to clear the minimum; fall back to an ALREADY HELD asset only when capital is too tight. Breadth beats saving a small buy fee.",
+    "  • SIZE (`size` 0.4-0.95): match sizing to conviction. Probe a speculative idea small (0.4-0.55); lean into a strong, liquid setup (0.85-0.95). Do NOT deploy the same fraction every cycle.",
+    "  • TERM (`term`): match the horizon to the thesis. A fast momentum/mean-reversion play wants express (2d); a steadier RWA or a thesis that needs room wants standard (7d); quick (3d) is the middle. Rotate — don't default to one term.",
+    "  • MAXIMIZE RISK-ADJUSTED GAINS: favor assets with genuine upside AND a clean, liquid exit-to-repay. The best pick is one you'd size up with a term that gives the thesis room — not the safest-but-pointless recycle.",
     "",
     cfg.dryRun
       ? "DRY RUN — this is a no-funds REHEARSAL. The risk scores you get back are heuristic estimates; treat them as usable and prefer to make a real PICK (especially an ALREADY HELD asset) so the full borrow flow can be validated. Nothing moves. Only HOLD if every option is genuinely unsuitable."
@@ -143,8 +167,9 @@ function taskPrompt(cfg: AgentConfig, menu: MenuItem[]): string {
     "Constraints:",
     `- Preferred category: ${cfg.preferredCategory}. RWAs (stocks) are far safer; memecoins are high-risk.`,
     `- Max acceptable Magpie risk score: ${cfg.maxTokenRisk} (0-100, lower = safer).`,
-    `- The agent borrows at the '${cfg.tier}' tier and MUST repay the full loan on time. Never pick an asset whose thinness/volatility would make a clean exit-to-repay unlikely.`,
-    `- Borrowed SOL is held as repay reserve (no re-leverage). You are choosing collateral, not a trade to flip.`,
+    `- Whatever 'term' you choose, the loan MUST be repaid in full on time — the guardian repays automatically, well before due. A longer term never rescues an illiquid pick: never choose an asset whose thinness/volatility would make a clean exit-to-repay unlikely.`,
+    `- 'size' is bounded by available capital + solvency reserves regardless of what you ask for; asking bigger never risks a default (the code clamps it). So size honestly to conviction.`,
+    `- Borrowed SOL is held as repay reserve (no re-leverage). You are choosing collateral + how to structure the loan, not a trade to flip.`,
     "- When nothing is clearly worth the risk, choose action='hold'. Holding is always acceptable and frequently correct.",
     "",
     "Research with assess_token_risk and get_pool_state, then call submit_decision exactly once.",
@@ -179,15 +204,26 @@ export async function chooseCandidateWithClaude(
     for (const block of resp.content as unknown as Array<Record<string, unknown>>) {
       if (block.type !== "tool_use") continue;
       if (block.name === "submit_decision") {
-        const d = block.input as Partial<BrainDecision>;
+        const raw = (block.input ?? {}) as Record<string, unknown>;
+        const d = raw as Partial<BrainDecision>;
         const conf = Math.max(0, Math.min(1, Number(d.confidence ?? 0)));
         const mint = d.action === "buy" ? String(d.mint ?? "") : undefined;
+        // TERM — accept only a valid tier; anything else => undefined (caller uses config default).
+        const termRaw = String(raw.term ?? "");
+        const tier = (["express", "quick", "standard"] as const).includes(termRaw as never)
+          ? (termRaw as BrainDecision["tier"])
+          : undefined;
+        // SIZE — clamp conviction to [0.4, 0.95]; non-numeric => undefined (caller default).
+        const sizeNum = Number(raw.size);
+        const sizeFraction = Number.isFinite(sizeNum) ? Math.max(0.4, Math.min(0.95, sizeNum)) : undefined;
         return {
           action: d.action === "buy" ? "buy" : "hold",
           mint,
           symbol: menu.find((m) => m.mint === mint)?.symbol,
           reasoning: String(d.reasoning ?? "(none)"),
           confidence: conf,
+          tier,
+          sizeFraction,
         };
       }
       const out = await runTool(agent, cfg, menu, String(block.name), (block.input ?? {}) as Record<string, unknown>);
@@ -233,6 +269,8 @@ export interface TradeCandidate {
 export interface TradeDecision {
   sells: string[]; // mints from the positions list
   buys: string[]; // mints from the candidate menu
+  /** OPTIONAL per-buy conviction multiplier keyed by mint (0.5=probe … 2.0=lean in). Clamped by the engine. */
+  sizings?: Record<string, number>;
   reasoning: string;
   confidence: number;
 }
@@ -259,6 +297,12 @@ const TRADE_TOOLS = [
           type: "array",
           items: { type: "string" },
           description: "Mints of CANDIDATES to buy now (must be from the candidate menu). [] to buy nothing.",
+        },
+        sizings: {
+          type: "object",
+          additionalProperties: { type: "number" },
+          description:
+            "OPTIONAL per-buy conviction, keyed by mint: 0.5 = half-size probe on a speculative idea, 1.0 = normal, up to 2.0 = double-size on a high-conviction setup. Size your best ideas bigger and your speculative ones smaller instead of a flat amount. Omit a mint (or use 1.0) for normal size. The engine clamps to solvency regardless.",
         },
         reasoning: { type: "string" },
         confidence: { type: "number", description: "0..1" },
@@ -303,7 +347,7 @@ function tradePrompt(
     `- A mechanical stop-loss (-${cfg.tradeStopLossPct}%) and take-profit (+${cfg.tradeTakeProfitPct}%) ALREADY run before you,`,
     "  so focus on thesis: is momentum/liquidity deteriorating (sell), or is a candidate genuinely worth a fresh entry?",
     `- Room for at most ${roomForBuys} NEW position(s) this cycle (book cap ${cfg.maxPositions}). Buying 0 is fine.`,
-    `- Each buy deploys ~${fmtSol(cfg.tradePositionLamports)} SOL. Max acceptable risk score: ${cfg.maxTokenRisk} (lower=safer).`,
+    `- Base buy size is ~${fmtSol(cfg.tradePositionLamports)} SOL; use \`sizings\` to scale each buy by CONVICTION (0.5 = half-size probe … 2.0 = double-size on a strong, liquid setup). Size your best ideas bigger and speculative ones smaller instead of a flat amount. Max acceptable risk score: ${cfg.maxTokenRisk} (lower=safer).`,
     "- Memecoins are brutal and most go to zero. Be selective; thin liquidity = no clean exit. When unsure, don't buy.",
     cfg.dryRun ? "- DRY RUN: nothing moves; risk scores are heuristic stubs. Still make realistic calls to validate the loop." : "",
     "",
@@ -354,12 +398,21 @@ export async function decideTradesWithClaude(
     for (const block of resp.content as unknown as Array<Record<string, unknown>>) {
       if (block.type !== "tool_use") continue;
       if (block.name === "submit_trades") {
-        const d = block.input as Partial<TradeDecision>;
+        const raw = (block.input ?? {}) as Record<string, unknown>;
+        const d = raw as Partial<TradeDecision>;
         const sells = (Array.isArray(d.sells) ? d.sells : []).map(String).filter((m) => posMints.has(m));
         const buys = (Array.isArray(d.buys) ? d.buys : []).map(String).filter((m) => candMints.has(m));
+        // Per-buy conviction, clamped 0.5..2.0, only for mints we're actually buying.
+        const rawSizings = (raw.sizings ?? {}) as Record<string, unknown>;
+        const sizings: Record<string, number> = {};
+        for (const m of buys) {
+          const v = Number(rawSizings[m]);
+          if (Number.isFinite(v)) sizings[m] = Math.max(0.5, Math.min(2, v));
+        }
         return {
           sells,
           buys,
+          sizings,
           reasoning: String(d.reasoning ?? "(none)"),
           confidence: Math.max(0, Math.min(1, Number(d.confidence ?? 0))),
         };
