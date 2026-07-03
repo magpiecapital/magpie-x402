@@ -263,7 +263,28 @@ export async function runTradeCycle(ctx: TradeCtx): Promise<void> {
     const cand = candidates.find((c) => c.mint === mint);
     const sym = cand?.symbol ?? mint.slice(0, 4);
 
-    // Risk gate (paid, cached) — defense in depth on top of the brain's own check.
+    // SIZE first (free, no payment) — brain conviction multiplier (0.5 = half-size probe
+    // … 2.0 = high-conviction lean-in) on the base position, bounded to 90% of free SOL
+    // (gas headroom) + MAX_BUY. Computed BEFORE the paid risk lookup so a candidate we
+    // can't fund at a real size never costs a risk assessment.
+    const mult = Math.max(0.5, Math.min(2, brainSizings[mint] ?? 1));
+    let spend = BigInt(Math.round(Number(cfg.tradePositionLamports) * mult));
+    if (spend > capByFree) spend = capByFree;
+    if (cfg.maxBuyLamports > 0n && spend > cfg.maxBuyLamports) spend = cfg.maxBuyLamports;
+    if (spend < minOpenLamports) {
+      // This candidate's conviction (or the MAX_BUY cap) sized it below the opening floor.
+      // If MAX_BUY itself is below the floor, NOTHING can ever open → stop the loop.
+      // Otherwise skip just THIS candidate — a later, higher-conviction one can still
+      // clear the floor (do NOT break: that would strand affordable buys later in the list).
+      if (cfg.maxBuyLamports > 0n && cfg.maxBuyLamports < minOpenLamports) {
+        log(`BUY loop stop — MAX_BUY ${fmt(cfg.maxBuyLamports)}◎ < open floor ${fmt(minOpenLamports)}◎; no position can open.`);
+        break;
+      }
+      log(`BUY ${sym} skipped — conviction-sized ${fmt(spend)}◎ below open floor ${fmt(minOpenLamports)}◎ (a higher-conviction candidate can still clear).`);
+      continue;
+    }
+
+    // Risk gate (paid, cached) — only after we know we'll fund a real position.
     if (!cfg.dryRun) {
       try {
         const r = await cachedTokenRisk(agent, mint);
@@ -278,19 +299,6 @@ export async function runTradeCycle(ctx: TradeCtx): Promise<void> {
       }
     }
 
-    // SIZE — brain conviction multiplier (0.5 = half-size probe … 2.0 = high-conviction
-    // lean-in) on the base position, bounded to 90% of free SOL (gas headroom) + MAX_BUY.
-    // Guaranteed >= minOpenLamports (mult >= 0.5 and capByFree >= minOpen), so no dust fills.
-    const mult = Math.max(0.5, Math.min(2, brainSizings[mint] ?? 1));
-    let spend = BigInt(Math.round(Number(cfg.tradePositionLamports) * mult));
-    if (spend > capByFree) spend = capByFree;
-    if (cfg.maxBuyLamports > 0n && spend > cfg.maxBuyLamports) spend = cfg.maxBuyLamports;
-    if (spend < minOpenLamports) {
-      // Only reachable if MAX_BUY is set below half a position (a config contradiction the
-      // boot guard warns about). Break — no later buy can clear it either.
-      log(`BUY ${sym} stop — sized ${fmt(spend)}◎ below the open floor ${fmt(minOpenLamports)}◎ (MAX_BUY too low?).`);
-      break;
-    }
     log(`BUY — ${sym}: conviction ${mult.toFixed(2)}× → deploying ${fmt(spend)}◎.`);
     const buy = await jupiterBuy({
       payer: keypair,
