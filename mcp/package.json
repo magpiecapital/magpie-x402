@@ -1,6 +1,6 @@
 {
   "name": "@magpieloans/magpie-mcp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "mcpName": "io.github.magpiecapital/magpie-mcp",
   "description": "MCP server exposing Magpie Capital's x402 API as native tools for Claude Desktop, Cursor, Windsurf, ChatGPT desktop, and any MCP-aware agent host.",
   "type": "module",
@@ -17,6 +17,7 @@
     "build": "tsc",
     "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test src/**/*.test.ts",
     "start": "node dist/index.js",
     "prepublishOnly": "rm -rf dist && tsc && chmod +x dist/index.js"
   },
