@@ -67,7 +67,7 @@ To start a borrow that supports these exits, call `magpie_build_borrow` with `ha
 
 Two paths. Both end at the same place.
 
-### Path A — npm (recommended once published)
+### Path A — npm (recommended)
 
 No clone, no build, no absolute paths in your host config:
 
@@ -95,7 +95,7 @@ Then in your host config:
 
 ### Path B — from source
 
-If the npm package isn't published yet, or you want to hack on the server:
+If you want to hack on the server, or pin a local build:
 
 ```bash
 git clone git@github.com:magpiecapital/magpie-x402.git
