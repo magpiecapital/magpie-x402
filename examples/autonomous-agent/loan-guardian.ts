@@ -122,6 +122,20 @@ export class LoanGuardian {
     this.self = keypair.publicKey;
   }
 
+  /**
+   * Optional SELF-HEAL hook: sell wallet-HELD (non-collateral) tokens to raise
+   * ~deficit lamports, returning the lamports actually raised. Set by the
+   * orchestrator (agent.ts → sellHeldToRaise). When present, the under-funded
+   * repay path funds itself from held positions BEFORE ever waiting on the
+   * operator — the open loan's OWN collateral is vaulted and is never touched.
+   * This is what turns a near-default into a self-covered repay (the 2026-07
+   * ZEREBRO near-default fix).
+   */
+  private raiseSol?: (deficitLamports: bigint) => Promise<bigint>;
+  setRaiseSol(fn: (deficitLamports: bigint) => Promise<bigint>): void {
+    this.raiseSol = fn;
+  }
+
   // ── solvency ────────────────────────────────────────────────────────────
   async liquidLamports(): Promise<bigint> {
     return BigInt(await this.conn.getBalance(this.self, "confirmed"));
@@ -301,20 +315,34 @@ export class LoanGuardian {
         return;
       }
 
-      const liquid = await this.liquidLamports().catch(() => 0n);
+      let liquid = await this.liquidLamports().catch(() => 0n);
       const need = this.repayReserveFor(loan);
+      // SELF-HEAL FIRST — if short, sell wallet-HELD (non-collateral) tokens to
+      // cover the repay BEFORE ever waiting on a human. The loan's OWN collateral
+      // is locked in its vault and is never sold here. This is the core fix for
+      // the near-default: the agent funds its own repay from its own positions
+      // instead of stalling until the operator wires SOL in (the ZEREBRO case).
+      if (liquid < need && this.raiseSol) {
+        try {
+          const raised = await this.raiseSol(need - liquid);
+          if (raised > 0n) {
+            log(`self-heal: raised ${(Number(raised) / 1e9).toFixed(4)} SOL selling held tokens to fund repay of ${loan.loanId}.`);
+            liquid = await this.liquidLamports().catch(() => liquid);
+          }
+        } catch (err) {
+          log(`self-heal sell for ${loan.loanId} failed: ${(err as Error).message}`);
+        }
+      }
       if (liquid < need) {
-        // UNDER-FUNDED: the build-repay tx will REVERT on-chain (insufficient
-        // lamports), so do NOT call the paid build-repay endpoint. Paying the
-        // 0.002-SOL x402 fee on a doomed repay only drains the wallet further —
-        // that death spiral is exactly what ate the borrowed reserve. Hold,
-        // alert the operator to fund the wallet, back off, and resume repaying
-        // the instant funds arrive. This NEVER abandons the loan.
-        crit(`under-funded to repay ${loan.loanId}: have ${liquid}, need ${need} (+gas). HOLDING — not paying for build-repay (would revert + burn the 0.002-SOL fee). Fund ${this.self.toBase58()} to resume.`);
+        // STILL under-funded after selling everything sellable: the build-repay tx
+        // would REVERT on-chain (insufficient lamports), so do NOT pay the 0.002-SOL
+        // x402 fee on a doomed repay. Hold, alert the operator to fund the wallet,
+        // back off, and resume the instant funds arrive. This NEVER abandons the loan.
+        crit(`under-funded to repay ${loan.loanId} even after selling held tokens: have ${liquid}, need ${need} (+gas). HOLDING — not paying for build-repay (would revert). Fund ${this.self.toBase58()} to resume.`);
         if (attempt === 1 || attempt % 12 === 0) {
           await this.notify?.send(
             "error",
-            `x402 agent UNDER-FUNDED — paused to stop burning fees. Loan ${loan.loanId} needs ~${(Number(need) / 1e9).toFixed(3)} SOL to repay; wallet holds ${(Number(liquid) / 1e9).toFixed(4)} SOL. Send SOL to ${this.self.toBase58()} — it auto-repays + resumes borrowing.`,
+            `x402 agent UNDER-FUNDED — sold what it could, still short. Loan ${loan.loanId} needs ~${(Number(need) / 1e9).toFixed(3)} SOL to repay; wallet holds ${(Number(liquid) / 1e9).toFixed(4)} SOL. Send SOL to ${this.self.toBase58()} — it auto-repays + resumes.`,
           );
         }
         await sleep(Math.min(300_000, 10_000 * attempt));
