@@ -116,9 +116,65 @@ interface DexPair {
   baseToken?: { address?: string; symbol?: string };
   quoteToken?: { address?: string };
   liquidity?: { usd?: number };
-  volume?: { h24?: number };
+  volume?: { h24?: number; h6?: number; h1?: number; m5?: number };
+  priceChange?: { h24?: number; h6?: number; h1?: number; m5?: number };
+  txns?: {
+    h24?: { buys?: number; sells?: number };
+    h6?: { buys?: number; sells?: number };
+    h1?: { buys?: number; sells?: number };
+  };
   pairCreatedAt?: number; // ms epoch
   marketCap?: number;
+}
+
+/**
+ * SIGNAL SCORING — the anti-adverse-selection core. The boosted feed is just a
+ * candidate POOL (tokens getting attention); we do NOT buy it blindly. We score
+ * each pair on real, sustained-momentum-with-confirmation signals and HARD-REJECT
+ * the pump/dump signatures the old "buy what's boosted" logic walked straight into:
+ *   • already spiked hard in the last hour  → buying the top of a pump
+ *   • dumping in the last hour              → catching a falling knife
+ *   • net selling (buy ratio < ~0.42)       → distribution, not accumulation
+ *   • no upward 6h/24h trend                → no momentum to ride
+ * Survivors are ranked by a 0-100 score (sustained momentum + buy pressure +
+ * healthy turnover + exit-liquidity depth). Higher = a healthier early trend.
+ */
+interface Signal {
+  score: number;
+  reject: string | null;
+  note: string;
+}
+function scoreCandidate(p: DexPair): Signal {
+  const liq = p.liquidity?.usd ?? 0;
+  const v1 = p.volume?.h1 ?? 0;
+  const pc1 = p.priceChange?.h1 ?? 0;
+  const pc6 = p.priceChange?.h6 ?? 0;
+  const pc24 = p.priceChange?.h24 ?? 0;
+  const t1 = p.txns?.h1 ?? {};
+  const buys1 = t1.buys ?? 0;
+  const sells1 = t1.sells ?? 0;
+  const flow1 = buys1 + sells1;
+  const buyRatio = flow1 > 0 ? buys1 / flow1 : 0.5;
+
+  // HARD REJECTS — do not buy pumps or dumps.
+  if (pc1 > 60) return { score: 0, reject: `already +${pc1.toFixed(0)}% in 1h (pump top)`, note: "" };
+  if (pc1 < -25) return { score: 0, reject: `dumping ${pc1.toFixed(0)}% in 1h`, note: "" };
+  if (flow1 > 0 && buyRatio < 0.42) return { score: 0, reject: `net selling (buys ${(buyRatio * 100).toFixed(0)}%)`, note: "" };
+  if (v1 <= 0) return { score: 0, reject: "no 1h volume (dead)", note: "" };
+  if (pc6 <= 0 && pc24 <= 0) return { score: 0, reject: "no upward 6h/24h trend", note: "" };
+
+  // SCORE components (each 0..1).
+  const mom6 = Math.max(0, Math.min(pc6, 50)) / 50; // 6h uptrend, capped at +50%
+  const continuation = pc1 > 0 && pc1 < Math.max(15, pc6 * 1.5) ? 1 : 0.3; // still rising, not a fresh spike
+  const momentum = mom6 * continuation;
+  const buyPressure = Math.max(0, Math.min((buyRatio - 0.42) / (0.75 - 0.42), 1)); // 0.42→0 … 0.75+→1
+  const turnover = v1 / (liq + 1);
+  const volHealth = Math.max(0, Math.min(turnover / 0.5, 1)); // 1h vol ≈ 50% of liq = healthy
+  const liqScore = Math.max(0, Math.min(liq / 150_000, 1)); // deeper liq (→$150k) = cleaner exit
+
+  const score = 40 * momentum + 25 * buyPressure + 20 * volHealth + 15 * liqScore;
+  const note = `6h ${pc6.toFixed(0)}% 1h ${pc1.toFixed(0)}% buy ${(buyRatio * 100).toFixed(0)}% turn ${(turnover * 100).toFixed(0)}% liq $${(liq / 1000).toFixed(0)}k → ${score.toFixed(0)}`;
+  return { score, reject: null, note };
 }
 
 /** Pull a raw pool of candidate Solana mints from DexScreener's trending/boosted feeds. */
@@ -215,9 +271,11 @@ export async function discoverTrenchCandidates(cfg: AgentConfig): Promise<Discov
   const mints = await sourceTrendingMints();
   if (!mints.length) return [];
 
-  // First pass — cheap market filters (one DexScreener call each), keep the
-  // best `maxVet` by liquidity to bound the expensive on-chain/Jupiter checks.
-  const prelim: Array<{ c: DiscoveredToken; decimals: number }> = [];
+  // First pass — cheap market filters + SIGNAL SCORING. Reject pump/dump/
+  // distribution signatures and rank by momentum-quality score (NOT raw
+  // liquidity), so the expensive gauntlet vets the healthiest early trends first.
+  const prelim: Array<{ c: DiscoveredToken; decimals: number; score: number; note: string }> = [];
+  let rejected = 0;
   for (const mint of mints) {
     const pair = await bestPairFor(mint);
     if (!pair || !pair.baseToken?.address) continue;
@@ -229,6 +287,13 @@ export async function discoverTrenchCandidates(cfg: AgentConfig): Promise<Discov
     if (vol < d.minVol24Usd) continue;
     if (ageMin < d.minAgeMin) continue; // too fresh = rug window
     if (ageMin > d.maxAgeHours * 60) continue; // too old = not a trench
+    // SIGNAL gate — reject the pump/dump/flat signatures the old logic bought
+    // into; score the survivors on sustained momentum + buy pressure + turnover.
+    const sig = scoreCandidate(pair);
+    if (sig.reject) {
+      rejected++;
+      continue;
+    }
     prelim.push({
       c: {
         mint,
@@ -240,13 +305,23 @@ export async function discoverTrenchCandidates(cfg: AgentConfig): Promise<Discov
         marketCapUsd: pair.marketCap,
       },
       decimals: 6, // memecoin default; only used to size the sellability probe
+      score: sig.score,
+      note: sig.note,
     });
   }
-  prelim.sort((a, b) => b.c.liquidityUsd - a.c.liquidityUsd);
+  // Rank by SIGNAL SCORE (healthiest early trend first), not by liquidity.
+  prelim.sort((a, b) => b.score - a.score);
   const shortlist = prelim.slice(0, d.maxVet);
+  if (prelim.length || rejected) {
+    console.log(
+      `[discovery] signal-scored: ${prelim.length} kept / ${rejected} rejected (pump/dump/flat). Top: ` +
+        (shortlist.slice(0, 6).map((s) => `${s.c.symbol} [${s.note}]`).join("  ·  ") || "—"),
+    );
+  }
 
   // Second pass — the deterministic downside-protection gauntlet (on-chain +
-  // Jupiter). Fail-closed: any token that can't be PROVEN safe is dropped.
+  // Jupiter), highest-scored first — so we return the best trends that also pass
+  // safety. Fail-closed: any token that can't be PROVEN safe is dropped.
   const passed: DiscoveredToken[] = [];
   for (const { c, decimals } of shortlist) {
     if (passed.length >= d.maxCandidates) break;

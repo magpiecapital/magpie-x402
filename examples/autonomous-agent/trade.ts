@@ -20,6 +20,7 @@ import type { AgentConfig } from "./config.js";
 import type { Notifier } from "./notifier.js";
 import type { LoanGuardian } from "./loan-guardian.js";
 import { Positions } from "./positions.js";
+import { Ledger } from "./ledger.js";
 import { getAllTokenHoldings } from "./holdings.js";
 import { jupiterBuy, jupiterSell, jupiterValueInSol } from "./jupiter.js";
 import {
@@ -49,6 +50,8 @@ export interface TradeCtx {
   keypair: Keypair;
   notifier: Notifier;
   positions: Positions;
+  /** Realized-P&L ledger + drawdown circuit-breaker (see ledger.ts). */
+  ledger: Ledger;
   conn: Connection;
   /**
    * The never-default guardian. The trade engine sizes its buys off
@@ -235,6 +238,20 @@ export async function runTradeCycle(ctx: TradeCtx): Promise<void> {
     if (await executeSell(ctx, m, "brain thesis exit")) sold.add(mint);
   }
 
+  // CIRCUIT-BREAKER — before opening ANY new position, check the drawdown /
+  // losing-streak guard. Aggressive alpha is the mandate, but a losing run must
+  // pause NEW risk rather than keep bleeding. Exits (mechanical + thesis) ran
+  // above and are NEVER blocked — only new entries are.
+  const breaker = ctx.ledger.circuitBreak(cfg.tradeMaxDrawdownLamports, cfg.tradeMaxConsecutiveLosses);
+  if (breaker && brainBuys.length) {
+    log(`CIRCUIT-BREAKER TRIPPED — halting new entries: ${breaker}.`);
+    await notifier.send(
+      "error",
+      `⛔ Trade circuit-breaker tripped — pausing NEW entries: ${breaker}. Existing positions are still managed + exited normally; it resets automatically as realized P&L recovers toward its high-water mark.`,
+    );
+    brainBuys = [];
+  }
+
   // 5b) fresh buys — sized, solvency-bounded, risk-gated, position-capped.
   let openNow = openCount - [...sold].filter((mt) => survivors.some((s) => s.mint === mt)).length;
   // A NEW position must be at least HALF the base size. tradeMinPositionLamports is a
@@ -347,10 +364,21 @@ async function executeSell(ctx: TradeCtx, m: Marked, why: string): Promise<boole
     return false;
   }
   positions.clear(m.mint);
+  // Record REALIZED P&L (proceeds − cost) to the ledger so the agent actually
+  // knows whether it's winning or losing, and the circuit-breaker can act. Only
+  // when we have both a real cost basis and real proceeds.
+  let realizedStr = "";
+  if (m.cost != null && m.cost > 0n && res.outLamports != null) {
+    const realized = ctx.ledger.recordExit(m.cost, res.outLamports);
+    const s = ctx.ledger.stats();
+    realizedStr =
+      ` · realized ${Number(realized) >= 0 ? "+" : ""}${fmt(realized)}◎` +
+      ` · cum ${Number(s.realizedPnlLamports) >= 0 ? "+" : ""}${fmt(s.realizedPnlLamports)}◎ (${s.wins}W/${s.losses}L)`;
+  }
   const pnl = m.pnlPct != null ? ` (${m.pnlPct >= 0 ? "+" : ""}${m.pnlPct.toFixed(0)}%)` : "";
   await notifier.send(
     "sell",
-    `Sold ${m.symbol} (${why})${pnl} for ${res.outLamports != null ? fmt(res.outLamports) : "?"}◎ — tx ${res.signature}.`,
+    `Sold ${m.symbol} (${why})${pnl} for ${res.outLamports != null ? fmt(res.outLamports) : "?"}◎${realizedStr} — tx ${res.signature}.`,
   );
   return true;
 }

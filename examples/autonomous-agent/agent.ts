@@ -27,6 +27,7 @@ import { brainEnabled, chooseCandidateWithClaude, type MenuItem } from "./brain.
 import { getExistingCollateral } from "./holdings.js";
 import { Notifier } from "./notifier.js";
 import { Positions } from "./positions.js";
+import { Ledger } from "./ledger.js";
 import { runTradeCycle } from "./trade.js";
 import { RULES } from "./magpie-playbook.js";
 
@@ -84,7 +85,8 @@ async function main() {
   // ── trade book state (only used when strategy includes 'trade'). ──────────
   const conn = new Connection(cfg.rpcUrl, "confirmed");
   const positions = new Positions();
-  const tradeCtx = { agent, cfg, keypair, notifier, positions, conn, guardian };
+  const ledger = new Ledger();
+  const tradeCtx = { agent, cfg, keypair, notifier, positions, conn, guardian, ledger };
   const doesTrade = cfg.strategy === "trade" || cfg.strategy === "both";
   const doesBorrow = cfg.strategy === "borrow" || cfg.strategy === "both";
 

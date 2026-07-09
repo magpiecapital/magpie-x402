@@ -35,6 +35,11 @@ export interface AgentConfig {
   tradeMinPositionLamports: bigint;
   /** Max slippage tolerated on a trade swap (bps). */
   tradeSlippageBps: number;
+  /** Circuit-breaker: halt NEW entries once realized-P&L drawdown from its high-water
+   *  mark reaches this (lamports). 0 = disabled. */
+  tradeMaxDrawdownLamports: bigint;
+  /** Circuit-breaker: halt NEW entries after this many consecutive losing trades. 0 = disabled. */
+  tradeMaxConsecutiveLosses: number;
 
   /** HARD allowlist of mints the agent may buy. Empty in dry-run = "auto-pick one to illustrate". */
   mintAllowlist: string[];
@@ -132,6 +137,8 @@ export function loadConfig(): AgentConfig {
     tradeMinHoldMs: num(process.env.TRADE_MIN_HOLD_MIN, 0) * 60_000,
     tradeMinPositionLamports: BigInt(Math.round(num(process.env.TRADE_MIN_POSITION_SOL, 0.01) * 1e9)),
     tradeSlippageBps: num(process.env.TRADE_SLIPPAGE_BPS, 150),
+    tradeMaxDrawdownLamports: BigInt(Math.round(num(process.env.TRADE_MAX_DRAWDOWN_SOL, 0.5) * 1e9)),
+    tradeMaxConsecutiveLosses: num(process.env.TRADE_MAX_CONSECUTIVE_LOSSES, 6),
 
     mintAllowlist: (process.env.MINT_ALLOWLIST ?? "")
       .split(",")
