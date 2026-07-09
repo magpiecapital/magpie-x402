@@ -76,6 +76,9 @@ async function main() {
   // Runs in EVERY strategy (even pure 'trade') as a defensive no-op: if any loan
   // is ever open on this wallet, never-default still applies. Cheap when there are none.
   const guardian = new LoanGuardian(agent, cfg, keypair, notifier);
+  // SELF-HEAL — let the guardian fund an under-funded repay by selling held
+  // (non-collateral) positions before it ever waits on the operator (ZEREBRO fix).
+  guardian.setRaiseSol((deficit) => sellHeldToRaise(agent, deficit, notifier));
   guardian.start();
 
   // ── trade book state (only used when strategy includes 'trade'). ──────────
@@ -138,6 +141,13 @@ async function main() {
     cycleNum++;
     try {
       await notifier.send("cycle", `Cycle ${cycleNum} — researching…`);
+      // SOLVENCY FIRST — runs EVERY cycle, even at max loans. While a loan is open
+      // the trade book keeps burning fees against the shared balance, eroding the
+      // repay reserve; restore the SOL buffer (selling a held token if needed)
+      // BEFORE any borrow/trade so an open loan can never drift under-funded. Fixes
+      // the gap where refuel sat behind runCycle's max-loans early-return — off
+      // exactly when a loan was open (the ZEREBRO near-default).
+      await maybeRefuel(agent, guardian, notifier);
       // BORROW BEFORE TRADE — never-default ordering. The borrow cycle may open a
       // new loan; its repay reserve only exists once guardian.safeBorrow() tracks
       // it. Running borrow first means the subsequent trade cycle sizes its buys
@@ -173,20 +183,13 @@ async function main() {
 async function runCycle(agent: MagpieAgent, guardian: LoanGuardian, notifier: Notifier) {
   // COST GUARD — if we're already at maxOpenLoans there is nothing to open this
   // cycle, so SKIP the paid brain research (a Claude call + risk lookups) that
-  // safeBorrow would refuse anyway. The guardian keeps protecting the open loan
-  // independently (its repay + gas + fees are fully RESERVED, so the open loan
-  // can never go stale — no refuel needed while it's open). This also stops
-  // Anthropic/x402 spend from scaling with idle cycles.
+  // safeBorrow would refuse anyway. Solvency/refuel already ran in runOne on
+  // EVERY cycle (before this), so the open loan's repay buffer is kept topped up
+  // even while we skip new-borrow research here — it is NOT gated behind this return.
   if (guardian.openLoans().length >= cfg.maxOpenLoans) {
-    log(`HOLD — at max ${cfg.maxOpenLoans} open loan(s); skipping research (no spend) until a slot frees.`);
+    log(`HOLD — at max ${cfg.maxOpenLoans} open loan(s); skipping new-borrow research (no spend) until a slot frees.`);
     return;
   }
-
-  // NEVER-STALE — a loan slot is FREE, so deployableLamports() here is true free
-  // SOL (no open-loan reserve to double-count). If it's too low to even open a
-  // recycle loan (borrow fee + gas), sell a held memecoin to top it up so the
-  // agent keeps cycling instead of idling (operator: "agents CANNOT go stale").
-  await maybeRefuel(agent, guardian, notifier);
 
   // 1) BRAIN — Claude proposes a candidate from the allowed menu (or HOLD); the
   //    deterministic gates + guardian still have the final word.
@@ -397,6 +400,61 @@ async function maybeRefuel(agent: MagpieAgent, guardian: LoanGuardian, notifier:
     return;
   }
   await notifier.send("buy", `✅ Refueled: sold ${pick.symbol} → +${fmt(sell.outLamports ?? 0n)}◎${sell.signature ? ` (tx ${sell.signature})` : ""}. Never-stale invariant holding.`);
+}
+
+/**
+ * Sell the most-liquid wallet-HELD token to raise ~`need` lamports of SOL, and
+ * return the lamports actually raised (0 if nothing sellable). Wired into the
+ * guardian's under-funded repay self-heal (setRaiseSol) so a repay funds itself
+ * from held positions before ever waiting on the operator. Only sells tokens in
+ * the WALLET — an open loan's collateral is locked in its vault and is never in
+ * the wallet, so it can never be sold here. Sells the minimum needed (need + 5%
+ * headroom), capped at the single most-valuable position. Best-effort: never throws.
+ */
+async function sellHeldToRaise(agent: MagpieAgent, need: bigint, notifier: Notifier): Promise<bigint> {
+  if (need <= 0n) return 0n;
+  const self = agent.publicKey();
+  if (!self) return 0n;
+  let tokens: Awaited<ReturnType<MagpieAgent["collateralCatalog"]>>["tokens"];
+  let held: Awaited<ReturnType<typeof getExistingCollateral>>;
+  try {
+    tokens = (await agent.collateralCatalog()).tokens;
+    held = await getExistingCollateral(new Connection(cfg.rpcUrl, "confirmed"), self, tokens);
+  } catch (err) {
+    log(`SELL-TO-RAISE — could not read holdings: ${(err as Error).message}`);
+    return 0n;
+  }
+  if (!held.length) return 0n;
+  const taker = self.toBase58();
+  const valued: Array<{ mint: string; symbol: string; amount: bigint; value: bigint }> = [];
+  for (const h of held) {
+    try {
+      const v = await jupiterValueInSol({ inputMint: h.mint, amountBaseUnits: BigInt(h.amount), taker });
+      if (v && v > 0n) valued.push({ mint: h.mint, symbol: h.symbol, amount: BigInt(h.amount), value: v });
+    } catch { /* unpriceable — skip */ }
+  }
+  if (!valued.length) return 0n;
+  valued.sort((a, b) => (b.value > a.value ? 1 : b.value < a.value ? -1 : 0));
+  const pick = valued[0];
+  const want = (need * 105n) / 100n; // deficit + 5% headroom
+  const sellValue = want >= pick.value ? pick.value : want;
+  const sellAmount = sellValue >= pick.value ? pick.amount : (pick.amount * sellValue) / pick.value;
+  if (sellAmount <= 0n) return 0n;
+  const sell = await jupiterSell({
+    payer: agentKeypair(),
+    inputMint: pick.mint,
+    amountBaseUnits: sellAmount,
+    rpcUrl: cfg.rpcUrl,
+    dryRun: cfg.dryRun,
+    slippageBps: 150,
+  });
+  if (!sell.ok) {
+    await notifier.send("warn", `Sell-to-raise of ${pick.symbol} failed: ${sell.reason}.`);
+    return 0n;
+  }
+  const raised = sell.outLamports ?? 0n;
+  await notifier.send("buy", `🔻 Sold ${pick.symbol} → +${fmt(raised)}◎${sell.signature ? ` (tx ${sell.signature})` : ""} to keep the wallet solvent for repay.`);
+  return raised;
 }
 
 interface Candidate {
