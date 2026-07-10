@@ -147,7 +147,7 @@ function safeSym(s: string | undefined): string {
 
 function taskPrompt(cfg: AgentConfig, menu: MenuItem[]): string {
   const list = menu
-    .map((m) => `- ${safeSym(m.symbol)}  ${m.mint}  [${m.category}]${m.held ? "  (ALREADY HELD — collateralize directly, no buy needed)" : ""}`)
+    .map((m) => `- ${safeSym(m.symbol)}  ${m.mint}  [${m.category}]${m.held ? "  (already held/recently used — REPETITIVE; pick ONLY if nothing fresh qualifies)" : "  (FRESH — not currently held)"}`)
     .join("\n");
   return [
     "Choose ONE collateral asset to collateralize (buy first if not already held), or decide to HOLD.",
@@ -155,11 +155,11 @@ function taskPrompt(cfg: AgentConfig, menu: MenuItem[]): string {
     "ALLOWED MENU — you may ONLY pick a mint from this list; anything else is rejected:",
     list,
     "",
-    "THINK OUTSIDE THE BOX — a monotonous stream of near-identical loans (same asset, same size, same term) is a FAILURE. On every axis, show range and intent:",
-    "  • ASSET: pick a DIFFERENT, high-quality name than your recent picks — real breadth across the supported universe (memecoins AND tokenized stocks/RWAs where allowed). Buying FRESH collateral is expected whenever you have capital to clear the minimum; fall back to an ALREADY HELD asset only when capital is too tight. Breadth beats saving a small buy fee.",
+    "BE FORWARD-THINKING — your JOB is to find the NEXT winner, not to re-borrow the same safe bag. A monotonous stream of near-identical loans (same asset, same size, same term) is the #1 FAILURE mode and is unacceptable. On every axis, show range and intent:",
+    "  • ASSET: pick a FRESH, forward-looking, high-quality name you have NOT used recently — chase genuine momentum and upside, not the most-boring safest coin. Real breadth across the supported universe is MANDATORY. Re-picking an already-held or recently-used token is a LAST RESORT, allowed ONLY if literally nothing fresh qualifies. Saving a small buy fee is NEVER a reason to repeat.",
     "  • SIZE (`size` 0.4-0.95): match sizing to conviction. Probe a speculative idea small (0.4-0.55); lean into a strong, liquid setup (0.85-0.95). Do NOT deploy the same fraction every cycle.",
     "  • TERM (`term`): match the horizon to the thesis. A fast momentum/mean-reversion play wants express (2d); a steadier RWA or a thesis that needs room wants standard (7d); quick (3d) is the middle. Rotate — don't default to one term.",
-    "  • MAXIMIZE RISK-ADJUSTED GAINS: favor assets with genuine upside AND a clean, liquid exit-to-repay. The best pick is one you'd size up with a term that gives the thesis room — not the safest-but-pointless recycle.",
+    "  • FORWARD-THINKING ALPHA: favor FRESH names with genuine momentum and upside that also have enough liquidity for a clean exit-to-repay. The best pick is a new, high-conviction mover — never the safest-but-repetitive recycle. If two names tie, take the one you have NOT touched recently.",
     "",
     cfg.dryRun
       ? "DRY RUN — this is a no-funds REHEARSAL. The risk scores you get back are heuristic estimates; treat them as usable and prefer to make a real PICK (especially an ALREADY HELD asset) so the full borrow flow can be validated. Nothing moves. Only HOLD if every option is genuinely unsuitable."
@@ -169,7 +169,7 @@ function taskPrompt(cfg: AgentConfig, menu: MenuItem[]): string {
     `- Max acceptable Magpie risk score: ${cfg.maxTokenRisk} (0-100, lower = safer).`,
     `- Whatever 'term' you choose, the loan MUST be repaid in full on time — the guardian repays automatically, well before due. A longer term never rescues an illiquid pick: never choose an asset whose thinness/volatility would make a clean exit-to-repay unlikely.`,
     `- 'size' is bounded by available capital + solvency reserves regardless of what you ask for; asking bigger never risks a default (the code clamps it). So size honestly to conviction.`,
-    `- Borrowed SOL is held as repay reserve (no re-leverage). You are choosing collateral + how to structure the loan, not a trade to flip.`,
+    `- Borrowed SOL is held as repay reserve (no re-leverage) — but picking FRESH, forward-looking collateral each cycle IS the alpha; build a diverse, forward-looking book, never park in one safe bag.`,
     "- When nothing is clearly worth the risk, choose action='hold'. Holding is always acceptable and frequently correct.",
     "",
     "Research with assess_token_risk and get_pool_state, then call submit_decision exactly once.",
@@ -195,7 +195,7 @@ export async function chooseCandidateWithClaude(
       max_tokens: 1024,
       system:
         SYSTEM_PROMPT +
-        "\n\nYou are the research/selection brain. You only SELECT collateral; the surrounding code enforces all safety (solvency, deadlines, repay). Prefer caution; HOLD when unsure.",
+        "\n\nYou are the research/selection brain. You only SELECT collateral; the surrounding code enforces all safety (solvency, deadlines, repay, risk limits). Be FORWARD-THINKING and seek fresh alpha with real breadth — the code already caps your risk, so your job is to find the next mover, not to hug the safest repetitive bag. HOLD only when nothing fresh genuinely qualifies.",
       tools: TOOLS as never,
       messages: messages as never,
     });
