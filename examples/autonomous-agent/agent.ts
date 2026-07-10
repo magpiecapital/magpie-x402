@@ -530,9 +530,11 @@ async function chooseCandidate(agent: MagpieAgent, notifier: Notifier, guardian:
   }
 
   // Held first (cheapest), then buy candidates; dedup by mint.
+  const denied = new Set(cfg.mintDenylist);
   const seen = new Set<string>();
   const pool: MenuItem[] = [];
   for (const t of [...heldCandidates, ...buyPool.map((t) => ({ ...t, held: heldMap.has(t.mint) }))]) {
+    if (denied.has(t.mint)) continue; // legacy/forbidden tokens — never buy OR recycle
     if (seen.has(t.mint)) continue;
     seen.add(t.mint);
     pool.push(t);

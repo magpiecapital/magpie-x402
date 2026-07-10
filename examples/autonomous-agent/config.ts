@@ -43,6 +43,8 @@ export interface AgentConfig {
 
   /** HARD allowlist of mints the agent may buy. Empty in dry-run = "auto-pick one to illustrate". */
   mintAllowlist: string[];
+  /** Mints the agent must NEVER buy or recycle (legacy/forbidden tokens). */
+  mintDenylist: string[];
   /**
    * When LIVE with an EMPTY allowlist: false = buy nothing (safest). true = let the
    * brain pick from Magpie's full approved-collateral catalog (already a vetted
@@ -141,6 +143,10 @@ export function loadConfig(): AgentConfig {
     tradeMaxConsecutiveLosses: num(process.env.TRADE_MAX_CONSECUTIVE_LOSSES, 6),
 
     mintAllowlist: (process.env.MINT_ALLOWLIST ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+    mintDenylist: (process.env.MINT_DENYLIST ?? "")
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean),
