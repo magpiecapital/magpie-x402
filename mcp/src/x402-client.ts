@@ -18,10 +18,16 @@ const MEMO_PROGRAM_ID = new PublicKey(
   "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr",
 );
 
+const BASE58_ALPHABET =
+  "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+const BASE58_LOOKUP = new Map(
+  [...BASE58_ALPHABET].map((char, index) => [char, index]),
+);
+
 export interface ClientCtx {
   baseUrl: string;
   rpcUrl: string;
-  /** Optional — required only for paid endpoints. */
+  /** Optional - required only for paid endpoints. */
   payer?: Keypair;
 }
 
@@ -66,7 +72,7 @@ export async function call<T = unknown>(
 
   if (!ctx.payer) {
     throw new Error(
-      `${path} is a paid endpoint (402) but no payer keypair was configured. Set MAGPIE_MCP_PAYER_KEYPAIR.`,
+      `${path} is a paid endpoint (402) but no payer keypair was configured. Set MAGPIE_MCP_PAYER_KEYPAIR or MAGPIE_MCP_PAYER_SECRET.`,
     );
   }
 
@@ -131,5 +137,54 @@ export function loadKeypairFromEnv(): Keypair | undefined {
     ) as number[];
     return Keypair.fromSecretKey(new Uint8Array(raw));
   }
-  return undefined;
+
+  const secret = process.env.MAGPIE_MCP_PAYER_SECRET?.trim();
+  if (!secret) return undefined;
+
+  const secretKey = decodeBase58Secret(secret);
+  return Keypair.fromSecretKey(secretKey);
+}
+
+function decodeBase58Secret(secret: string): Uint8Array {
+  if (!secret) {
+    throw new Error("MAGPIE_MCP_PAYER_SECRET is empty");
+  }
+
+  const bytes = decodeBase58(secret);
+  if (bytes.length !== 64) {
+    throw new Error(
+      `MAGPIE_MCP_PAYER_SECRET must decode to a 64-byte Solana secret key; got ${bytes.length} bytes`,
+    );
+  }
+  return bytes;
+}
+
+function decodeBase58(value: string): Uint8Array {
+  const bytes: number[] = [];
+
+  for (const char of value) {
+    const digit = BASE58_LOOKUP.get(char);
+    if (digit === undefined) {
+      throw new Error(`invalid base58 character in MAGPIE_MCP_PAYER_SECRET: ${char}`);
+    }
+
+    let carry = digit;
+    for (let i = 0; i < bytes.length; i += 1) {
+      const next = bytes[i] * 58 + carry;
+      bytes[i] = next & 0xff;
+      carry = next >> 8;
+    }
+
+    while (carry > 0) {
+      bytes.push(carry & 0xff);
+      carry >>= 8;
+    }
+  }
+
+  for (const char of value) {
+    if (char !== "1") break;
+    bytes.push(0);
+  }
+
+  return Uint8Array.from(bytes.reverse());
 }
