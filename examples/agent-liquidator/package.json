@@ -1,0 +1,32 @@
+{
+  "name": "magpie-agent-liquidator",
+  "version": "1.0.0",
+  "description": "Production-grade reference liquidation bot for Magpie x402 — polls liquidatable loans, profit-checks, signs locally, submits on-chain.",
+  "type": "module",
+  "scripts": {
+    "start": "tsx liquidator.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@magpieloans/magpie-agent": "^0.2.0",
+    "@solana/web3.js": "^1.95.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.5.0"
+  },
+  "keywords": [
+    "magpie",
+    "x402",
+    "solana",
+    "defi",
+    "liquidation",
+    "keeper",
+    "agent"
+  ],
+  "license": "MIT"
+}
