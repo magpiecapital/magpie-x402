@@ -56,6 +56,26 @@ operator through https://magpie.capital/security. We respond within
 We do not take legal action against researchers following
 responsible disclosure practices.
 
+## Security assessment
+
+Magpie's V4 lending program completed an independent security assessment by
+**Sec3** (a Solana-native security firm, formerly Soteria). The engagement
+concluded with a **final report on 2026-08-09**: **24 findings — 20 resolved,
+4 acknowledged, none open**, including both **High-severity findings resolved**.
+The four acknowledged findings are accepted design trade-offs the firm reviewed,
+not outstanding bugs.
+
+Honest scope note: the remediated build deploys at a **new program ID** after
+operator sign-off, so the audited code is **not yet the live program** — we say
+*"V4's security assessment is complete,"* not *"Magpie is audited,"* and will earn
+the latter phrasing once the audited build is the one in production. The
+audit-target repository (`magpiecapital/magpie-v4`) is kept **private** during
+review with the firm granted **read-only** access; V3 and the credit-oracle
+program are next in line. Reports publish at
+**https://github.com/magpiecapital/audits**, and the firm's own set at
+**https://github.com/sec3-service/reports**. An audit reduces risk; it does not
+eliminate it.
+
 ## Defense in depth
 
 Patterns enforced in code:
