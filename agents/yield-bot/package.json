@@ -16,11 +16,11 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@solana/web3.js": "^1.95.0"
+    "@solana/web3.js": "^1.99.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
-    "tsx": "^4.0.0",
+    "tsx": "^4.23.13",
     "typescript": "^5.5.0"
   }
 }
