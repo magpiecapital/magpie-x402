@@ -37,6 +37,31 @@ export interface PaidCallResult<T> {
   } | null;
 }
 
+/** Exact payment challenge presented to the policy hook before signing. */
+export interface PaymentRequirements {
+  endpoint: string;
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+  payTo: string;
+  amountLamports: string;
+  nonce: string;
+  memo: string;
+}
+
+/** Return abort:true to refuse a payment without invoking the signer. */
+export interface BeforePaymentDecision {
+  abort?: boolean;
+  reason?: string;
+  receiptId?: string;
+}
+
+/**
+ * Optional external policy boundary. The hook runs after the 402 safety gates
+ * and immediately before transaction construction and signing.
+ */
+export type BeforePaymentHook = (
+  requirements: Readonly<PaymentRequirements>,
+) => BeforePaymentDecision | void | Promise<BeforePaymentDecision | void>;
+
 export interface X402ErrorOptions {
   /** Machine-readable failure code, e.g. "confirm_timeout" | "tx_failed" | "submit_failed". */
   code?: string;
@@ -88,6 +113,8 @@ export interface X402Context {
    * wallet (server MAGPIE_PAY_TO) to fully neutralize recipient spoofing.
    */
   allowedRecipients?: string[];
+  /** Optional external policy check. Any throw is fail-closed. */
+  beforePayment?: BeforePaymentHook;
 }
 
 export async function paidCall<T = unknown>(
@@ -170,6 +197,37 @@ export async function paidCall<T = unknown>(
     );
   }
 
+  if (ctx.beforePayment) {
+    const requirements: PaymentRequirements = {
+      endpoint: url.toString(),
+      method,
+      payTo,
+      amountLamports: amount.toString(),
+      nonce,
+      memo,
+    };
+    try {
+      const decision = await ctx.beforePayment(Object.freeze({ ...requirements }));
+      if (decision?.abort) {
+        throw new X402Error(
+          `${path}: payment refused by beforePayment policy${decision.reason ? ` (${decision.reason})` : ""}`,
+          402,
+          { requirements, decision },
+          { code: "policy_denied", retryable: false },
+        );
+      }
+    } catch (error) {
+      if (error instanceof X402Error) throw error;
+      const reason = error instanceof Error ? error.message : "policy hook failed";
+      throw new X402Error(
+        `${path}: beforePayment policy failed closed (${reason})`,
+        503,
+        { requirements },
+        { code: "policy_hook_failed", retryable: false },
+      );
+    }
+  }
+
   // Pay on Solana.
   const connection = new Connection(ctx.rpcUrl, "confirmed");
   const tx = new Transaction();
@@ -224,3 +282,4 @@ export async function freeGet<T = unknown>(
   const result = await paidCall<T>(ctx, "GET", path, { query, headers });
   return result.data;
 }
+

@@ -264,6 +264,46 @@ new MagpieAgent({
 
 For production traffic, use a paid Helius/Triton/QuickNode URL — the default public RPC will rate-limit you.
 
+### External pre-sign policy (optional)
+
+Integrators can add an external policy service immediately before any x402
+payment is signed. The callback receives a detached copy of the exact
+endpoint, recipient, amount, nonce, and memo from the 402 challenge. Return
+`{ abort: true, reason }` to refuse the payment; if the callback throws, the
+SDK fails closed and the signer is never called.
+
+```ts
+const agent = new MagpieAgent({
+  signer,
+  beforePayment: async (requirements) => {
+    const response = await fetch(process.env.VARYNTIQ_URL + "/check", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${process.env.VARYNTIQ_TOKEN}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        agent_id: "magpie-demo",
+        endpoint: requirements.endpoint,
+        rail: "x402/solana/v1",
+        amount_minor: requirements.amountLamports,
+        currency: "SOL",
+        payee: requirements.payTo,
+        x402: requirements,
+      }),
+    });
+    if (!response.ok) throw new Error("policy service unavailable");
+    const decision = await response.json();
+    if (decision.decision !== "ALLOW") {
+      return { abort: true, reason: decision.reason ?? decision.decision };
+    }
+  },
+});
+```
+
+This hook never receives a keypair and does not custody or settle funds. It is
+intended for independent policy services such as Varyntiq.
+
 ### Bring your own wallet (Privy / Turnkey / SendAI BaseWallet / embedded)
 
 Agent frameworks usually keep the key in a wallet service and **never** expose a raw `Keypair`. Pass a `signer` instead — any object that implements three methods:
@@ -297,3 +337,4 @@ Premium Tier (in build, 4–6 weeks) — tokenized US equities ($NVDAx, $COINx, 
 ## License
 
 MIT.
+

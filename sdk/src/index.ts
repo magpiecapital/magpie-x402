@@ -41,6 +41,7 @@ import type { MagpieSigner } from "./envelope.js";
 import { sendAndConfirmRaw } from "./submit.js";
 
 export { X402Error };
+export type { BeforePaymentDecision, BeforePaymentHook, PaymentRequirements } from "./x402.js";
 export { verifyWebhookSignature, IntentMatchedPayload } from "./webhooks.js";
 export { buildSignedEnvelope, buildManagementHeaders, envelopeHeaders, SignedEnvelope } from "./envelope.js";
 // External-signer surface — implement `MagpieSigner` for a Privy/Turnkey/SendAI
@@ -230,6 +231,12 @@ export interface MagpieAgentOptions {
   baseUrl?: string;
   /** Magpie cosign endpoint host. Defaults to magpie.capital. */
   siteUrl?: string;
+  /**
+   * Optional external policy check. It runs after the built-in amount and
+   * recipient gates, immediately before any payment transaction is signed.
+   * A returned `{ abort: true }` or a thrown error prevents signing.
+   */
+  beforePayment?: import("./x402.js").BeforePaymentHook;
 }
 
 // ── Main SDK class ──────────────────────────────────────────────────
@@ -256,6 +263,7 @@ export class MagpieAgent {
       baseUrl: (opts.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, ""),
       rpcUrl: opts.rpcUrl ?? DEFAULT_RPC_URL,
       signer: this.signer,
+      beforePayment: opts.beforePayment,
     };
   }
 
@@ -1130,3 +1138,4 @@ export class MagpieAgent {
     return parsed.toString();
   }
 }
+
